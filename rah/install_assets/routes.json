@@ -1,0 +1,514 @@
+{
+  "schema_version": 1,
+  "routes": [
+    {
+      "app_id": "ldr",
+      "platform": "ubuntu",
+      "arch": "x64",
+      "upstream_version": "2.0.1",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "ubuntu-ldr.lock",
+      "lock_sha256": "cce054be3f65d79aa739f406caf63740f80efe6f7234358a18d3d1eb29e86d4e",
+      "licence": "MIT",
+      "notices": [
+        "local-deep-research upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Ubuntu x64. Ubuntu 26.04 is the CI target."
+      ],
+      "essential": [
+        "local-deep-research==2.0.1",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "ldr",
+      "native_entry": "ldr-web",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "LDR_CHAT:openrouter"
+      ],
+      "smoke_id": "ldr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "ldr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "wikipedia==1.4.0",
+          "sha256": "db0fad1829fdd441b1852306e9856398204dc0786d2996dd2e0c8bb8e26133b2",
+          "url": "https://files.pythonhosted.org/packages/67/35/25e68fbc99e672127cc6fbb14b8ec1ba3dfef035bf1e4c90f78f24a80b7d/wikipedia-1.4.0.tar.gz"
+        },
+        {
+          "distribution": "google-search-results==2.4.2",
+          "sha256": "603a30ecae2af8e600b22635757a6df275dad4b934f975e67878ccd640b78245",
+          "url": "https://files.pythonhosted.org/packages/77/30/b3a6f6a2e00f8153549c2fa345c58ae1ce8e5f3153c2fe0484d444c3abcb/google_search_results-2.4.2.tar.gz"
+        },
+        {
+          "distribution": "jstyleson==0.0.2",
+          "sha256": "680003f3b15a2959e4e6a351f3b858e3c07dd3e073a0d54954e34d8ea5e1308e",
+          "url": "https://files.pythonhosted.org/packages/5f/c1/3791e39d65c39b4e081010f2cf6f9443b7b6b9f6de63a5e458172c5c9376/jstyleson-0.0.2.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "torch_backend": "cpu",
+      "evidence_status": "candidate",
+      "structured_citations": "ldr-ris-v1"
+    },
+    {
+      "app_id": "gptr",
+      "platform": "ubuntu",
+      "arch": "x64",
+      "upstream_version": "3.8.0",
+      "python_build": "3.12.14",
+      "artifacts": [
+        {
+          "file": "gptr-source.tar.gz",
+          "sha256": "3da88b0d6da7f5aba15c65edbb318600a312981d350abd83d26d54f6a85b6d3c",
+          "source_ref": "597a99e2ef879606229754ec0d575a89eb587464",
+          "url": "https://codeload.github.com/assafelovic/gpt-researcher/tar.gz/597a99e2ef879606229754ec0d575a89eb587464",
+          "type": "tar.gz"
+        }
+      ],
+      "lock_path": "ubuntu-gptr.lock",
+      "lock_sha256": "9dca24204542f67d49f8719fe0a387ca27f460220f95970f85e2d09275f61725",
+      "licence": "Apache-2.0 source; MIT PyPI metadata",
+      "notices": [
+        "gpt-researcher upstream distribution",
+        "Included source archive preserves its upstream LICENSE and vendored frontend notices.",
+        "Classic browser backend and CLI use the same source archive."
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Ubuntu x64. Ubuntu 26.04 is the CI target."
+      ],
+      "essential": [
+        "gpt-researcher==0.17.0",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "gptr",
+      "native_entry": "cli.py",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "GPTR_FAST:openrouter",
+        "GPTR_SMART:openrouter",
+        "GPTR_STRATEGIC:openrouter",
+        "GPTR_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "gptr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "gptr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "docopt==0.6.2",
+          "sha256": "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491",
+          "url": "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz"
+        },
+        {
+          "distribution": "sgmllib3k==1.0.0",
+          "sha256": "7868fb1c8bfa764c1ac563d3cf369c381d1325d36124933a726f29fcdaa812e9",
+          "url": "https://files.pythonhosted.org/packages/9e/bd/3704a8c3e0942d711c1299ebf7b9091930adae6675d7c8f476a7ce48653c/sgmllib3k-1.0.0.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "evidence_status": "candidate"
+    },
+    {
+      "app_id": "pqa",
+      "platform": "ubuntu",
+      "arch": "x64",
+      "upstream_version": "2026.8.12",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "ubuntu-pqa.lock",
+      "lock_sha256": "03fde5bf1872f2f7100b3c62238d477875ae022e80f5137de4653af6789eabe8",
+      "licence": "Apache-2.0",
+      "notices": [
+        "paper-qa upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Ubuntu x64. Ubuntu 26.04 is the CI target."
+      ],
+      "essential": [
+        "paper-qa==2026.8.12",
+        "hash-locked Python runtime dependencies",
+        "fhlmi==0.46.2 (upstream agent tool compatibility)"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "pqa",
+      "native_entry": "pqa",
+      "launch_kind": "cli",
+      "settings_capabilities": [
+        "PQA_ANSWER:openrouter",
+        "PQA_SUMMARY:openrouter",
+        "PQA_AGENT:openrouter",
+        "PQA_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "pqa-installed-entry",
+      "qualification_only": false,
+      "evidence_status": "candidate"
+    },
+    {
+      "app_id": "ldr",
+      "platform": "windows",
+      "arch": "x64",
+      "upstream_version": "2.0.1",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "windows-ldr.lock",
+      "lock_sha256": "f586993918bb4418b9dae1d694c8d76a0c89d92c82a4c795bdfd49c6dd4dedb9",
+      "licence": "MIT",
+      "notices": [
+        "local-deep-research upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Windows 11 x64. Windows Server 2025 is the CI target."
+      ],
+      "essential": [
+        "local-deep-research==2.0.1",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "ldr",
+      "native_entry": "ldr-web",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "LDR_CHAT:openrouter"
+      ],
+      "smoke_id": "ldr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "ldr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "wikipedia==1.4.0",
+          "sha256": "db0fad1829fdd441b1852306e9856398204dc0786d2996dd2e0c8bb8e26133b2",
+          "url": "https://files.pythonhosted.org/packages/67/35/25e68fbc99e672127cc6fbb14b8ec1ba3dfef035bf1e4c90f78f24a80b7d/wikipedia-1.4.0.tar.gz"
+        },
+        {
+          "distribution": "google-search-results==2.4.2",
+          "sha256": "603a30ecae2af8e600b22635757a6df275dad4b934f975e67878ccd640b78245",
+          "url": "https://files.pythonhosted.org/packages/77/30/b3a6f6a2e00f8153549c2fa345c58ae1ce8e5f3153c2fe0484d444c3abcb/google_search_results-2.4.2.tar.gz"
+        },
+        {
+          "distribution": "jstyleson==0.0.2",
+          "sha256": "680003f3b15a2959e4e6a351f3b858e3c07dd3e073a0d54954e34d8ea5e1308e",
+          "url": "https://files.pythonhosted.org/packages/5f/c1/3791e39d65c39b4e081010f2cf6f9443b7b6b9f6de63a5e458172c5c9376/jstyleson-0.0.2.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "torch_backend": "cpu",
+      "evidence_status": "candidate",
+      "structured_citations": "ldr-ris-v1"
+    },
+    {
+      "app_id": "gptr",
+      "platform": "windows",
+      "arch": "x64",
+      "upstream_version": "3.8.0",
+      "python_build": "3.12.14",
+      "artifacts": [
+        {
+          "file": "gptr-source.tar.gz",
+          "sha256": "3da88b0d6da7f5aba15c65edbb318600a312981d350abd83d26d54f6a85b6d3c",
+          "source_ref": "597a99e2ef879606229754ec0d575a89eb587464",
+          "url": "https://codeload.github.com/assafelovic/gpt-researcher/tar.gz/597a99e2ef879606229754ec0d575a89eb587464",
+          "type": "tar.gz"
+        }
+      ],
+      "lock_path": "windows-gptr.lock",
+      "lock_sha256": "c7621632eba796296381c968009957e38d3335c1584fb3bc18119e31753bb0ad",
+      "licence": "Apache-2.0 source; MIT PyPI metadata",
+      "notices": [
+        "gpt-researcher upstream distribution",
+        "Included source archive preserves its upstream LICENSE and vendored frontend notices.",
+        "Classic browser backend and CLI use the same source archive."
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Windows 11 x64. Windows Server 2025 is the CI target."
+      ],
+      "essential": [
+        "gpt-researcher==0.17.0",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "gptr",
+      "native_entry": "cli.py",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "GPTR_FAST:openrouter",
+        "GPTR_SMART:openrouter",
+        "GPTR_STRATEGIC:openrouter",
+        "GPTR_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "gptr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "gptr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "docopt==0.6.2",
+          "sha256": "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491",
+          "url": "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz"
+        },
+        {
+          "distribution": "sgmllib3k==1.0.0",
+          "sha256": "7868fb1c8bfa764c1ac563d3cf369c381d1325d36124933a726f29fcdaa812e9",
+          "url": "https://files.pythonhosted.org/packages/9e/bd/3704a8c3e0942d711c1299ebf7b9091930adae6675d7c8f476a7ce48653c/sgmllib3k-1.0.0.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "evidence_status": "candidate"
+    },
+    {
+      "app_id": "pqa",
+      "platform": "windows",
+      "arch": "x64",
+      "upstream_version": "2026.8.12",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "windows-pqa.lock",
+      "lock_sha256": "73c5159aa9fda38cda3d80de378268e46b7a8319ddd5c499c698e7189ad85308",
+      "licence": "Apache-2.0",
+      "notices": [
+        "paper-qa upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "Windows 11 x64. Windows Server 2025 is the CI target."
+      ],
+      "essential": [
+        "paper-qa==2026.8.12",
+        "hash-locked Python runtime dependencies",
+        "fhlmi==0.46.2 (upstream agent tool compatibility)"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "pqa",
+      "native_entry": "pqa",
+      "launch_kind": "cli",
+      "settings_capabilities": [
+        "PQA_ANSWER:openrouter",
+        "PQA_SUMMARY:openrouter",
+        "PQA_AGENT:openrouter",
+        "PQA_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "pqa-installed-entry",
+      "qualification_only": false,
+      "evidence_status": "candidate"
+    },
+    {
+      "app_id": "ldr",
+      "platform": "macos",
+      "arch": "arm64",
+      "upstream_version": "2.0.1",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "macos-ldr.lock",
+      "lock_sha256": "3c7c92c70a21f356e27df51fca55dd2e403b7b429c549d94158cce8c349faaeb",
+      "licence": "MIT",
+      "notices": [
+        "local-deep-research upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "macOS 14 or later on Apple silicon. macOS 15 is the CI target."
+      ],
+      "essential": [
+        "local-deep-research==2.0.1",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "ldr",
+      "native_entry": "ldr-web",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "LDR_CHAT:openrouter"
+      ],
+      "smoke_id": "ldr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "ldr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "wikipedia==1.4.0",
+          "sha256": "db0fad1829fdd441b1852306e9856398204dc0786d2996dd2e0c8bb8e26133b2",
+          "url": "https://files.pythonhosted.org/packages/67/35/25e68fbc99e672127cc6fbb14b8ec1ba3dfef035bf1e4c90f78f24a80b7d/wikipedia-1.4.0.tar.gz"
+        },
+        {
+          "distribution": "google-search-results==2.4.2",
+          "sha256": "603a30ecae2af8e600b22635757a6df275dad4b934f975e67878ccd640b78245",
+          "url": "https://files.pythonhosted.org/packages/77/30/b3a6f6a2e00f8153549c2fa345c58ae1ce8e5f3153c2fe0484d444c3abcb/google_search_results-2.4.2.tar.gz"
+        },
+        {
+          "distribution": "jstyleson==0.0.2",
+          "sha256": "680003f3b15a2959e4e6a351f3b858e3c07dd3e073a0d54954e34d8ea5e1308e",
+          "url": "https://files.pythonhosted.org/packages/5f/c1/3791e39d65c39b4e081010f2cf6f9443b7b6b9f6de63a5e458172c5c9376/jstyleson-0.0.2.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "evidence_status": "candidate",
+      "structured_citations": "ldr-ris-v1"
+    },
+    {
+      "app_id": "gptr",
+      "platform": "macos",
+      "arch": "arm64",
+      "upstream_version": "3.8.0",
+      "python_build": "3.12.14",
+      "artifacts": [
+        {
+          "file": "gptr-source.tar.gz",
+          "sha256": "3da88b0d6da7f5aba15c65edbb318600a312981d350abd83d26d54f6a85b6d3c",
+          "source_ref": "597a99e2ef879606229754ec0d575a89eb587464",
+          "url": "https://codeload.github.com/assafelovic/gpt-researcher/tar.gz/597a99e2ef879606229754ec0d575a89eb587464",
+          "type": "tar.gz"
+        }
+      ],
+      "lock_path": "macos-gptr.lock",
+      "lock_sha256": "a46235a187da098cef91aced9459f0b0280174dd3520695227abbe89ddc5b220",
+      "licence": "Apache-2.0 source; MIT PyPI metadata",
+      "notices": [
+        "gpt-researcher upstream distribution",
+        "Included source archive preserves its upstream LICENSE and vendored frontend notices.",
+        "Classic browser backend and CLI use the same source archive."
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "macOS 14 or later on Apple silicon. macOS 15 is the CI target."
+      ],
+      "essential": [
+        "gpt-researcher==0.17.0",
+        "hash-locked Python runtime dependencies"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "gptr",
+      "native_entry": "cli.py",
+      "launch_kind": "browser",
+      "settings_capabilities": [
+        "GPTR_FAST:openrouter",
+        "GPTR_SMART:openrouter",
+        "GPTR_STRATEGIC:openrouter",
+        "GPTR_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "gptr-installed-entry",
+      "qualification_only": false,
+      "wheelhouse": "gptr-wheels",
+      "allow_registry": true,
+      "built_sources": [
+        {
+          "distribution": "docopt==0.6.2",
+          "sha256": "49b3a825280bd66b3aa83585ef59c4a8c82f2c8a522dbe754a8bc8d08c85c491",
+          "url": "https://files.pythonhosted.org/packages/a2/55/8f8cab2afd404cf578136ef2cc5dfb50baa1761b68c9da1fb1e4eed343c9/docopt-0.6.2.tar.gz"
+        },
+        {
+          "distribution": "sgmllib3k==1.0.0",
+          "sha256": "7868fb1c8bfa764c1ac563d3cf369c381d1325d36124933a726f29fcdaa812e9",
+          "url": "https://files.pythonhosted.org/packages/9e/bd/3704a8c3e0942d711c1299ebf7b9091930adae6675d7c8f476a7ce48653c/sgmllib3k-1.0.0.tar.gz"
+        },
+        {
+          "distribution": "langdetect==1.0.9",
+          "sha256": "cbc1fef89f8d062739774bd51eda3da3274006b3661d199c2655f6b3f6d605a0",
+          "url": "https://files.pythonhosted.org/packages/0e/72/a3add0e4eec4eb9e2569554f7c70f4a3c27712f40e3284d483e88094cc0e/langdetect-1.0.9.tar.gz"
+        }
+      ],
+      "evidence_status": "candidate"
+    },
+    {
+      "app_id": "pqa",
+      "platform": "macos",
+      "arch": "arm64",
+      "upstream_version": "2026.8.12",
+      "python_build": "3.12.14",
+      "artifacts": [],
+      "lock_path": "macos-pqa.lock",
+      "lock_sha256": "03fde5bf1872f2f7100b3c62238d477875ae022e80f5137de4653af6789eabe8",
+      "licence": "Apache-2.0",
+      "notices": [
+        "paper-qa upstream distribution"
+      ],
+      "prerequisites": [
+        "Python 3.12.14, uv and access to PyPI",
+        "See handover.md for desktop prerequisites",
+        "macOS 14 or later on Apple silicon. macOS 15 is the CI target."
+      ],
+      "essential": [
+        "paper-qa==2026.8.12",
+        "hash-locked Python runtime dependencies",
+        "fhlmi==0.46.2 (upstream agent tool compatibility)"
+      ],
+      "extras": [
+        "Configured model and search providers may charge separately."
+      ],
+      "estimated_bytes": null,
+      "adapter_id": "pqa",
+      "native_entry": "pqa",
+      "launch_kind": "cli",
+      "settings_capabilities": [
+        "PQA_ANSWER:openrouter",
+        "PQA_SUMMARY:openrouter",
+        "PQA_AGENT:openrouter",
+        "PQA_EMBEDDING:openrouter"
+      ],
+      "smoke_id": "pqa-installed-entry",
+      "qualification_only": false,
+      "evidence_status": "candidate"
+    }
+  ]
+}

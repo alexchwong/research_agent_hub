@@ -1,0 +1,32 @@
+:root { color-scheme: light; font-family: system-ui, sans-serif; color: #142834; background: #f4f7f7; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { display: flex; align-items: center; gap: 1.2rem; flex-wrap: wrap; padding: 1rem 5vw; background: #142d3b; color: #fff; }
+.brand { font-weight: 750; font-size: 1.15rem; }
+small { color: #a7c5cb; font-weight: 500; }
+nav { display: flex; gap: .35rem; flex-wrap: wrap; }
+header button { color: #fff; border-color: #537987; background: transparent; }
+header [aria-current="page"] { background: #286278; }
+.quit { margin-left: auto; }
+main { max-width: 72rem; margin: auto; padding: 1.25rem 5vw 4rem; }
+h1 { margin: .25rem 0 1rem; }
+h2, h3 { margin: 0 0 .65rem; }
+section { margin: .85rem 0; padding: 1em; background: #fff; border: 1px solid #d5e2e3; border-radius: .65rem; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 16rem), 1fr)); gap: .8rem; }
+.grid section { margin: 0; }
+button, input, select, textarea { font: inherit; }
+button { cursor: pointer; border: 1px solid #8ea7ae; border-radius: .35rem; background: #fff; color: #17394a; padding: .38em .62em; margin: .15rem .28rem .15rem 0; }
+button:hover { background: #e6f1f2; color: #122d3a; }
+button:disabled { opacity: .55; cursor: default; }
+input:not([type=checkbox]), textarea, select { display: block; width: 100%; max-width: 42em; padding: .45em; margin: .25em 0 .65em; border: 1px solid #a8bbc0; border-radius: .35rem; }
+input[type=checkbox] { margin-right: .5em; }
+label { display: block; }
+pre { padding: .65em; background: #edf3f4; white-space: pre-wrap; overflow-wrap: anywhere; }
+li { margin: .3rem 0; }
+#message { min-height: 1.3em; color: #7b361b; }
+dt { font-weight: 650; }
+dd { margin-bottom: .65rem; }
+dialog { width: min(43rem, 92vw); max-height: 88vh; padding: 1.3rem; border-radius: .65rem; border: 1px solid #8ea7ae; color: inherit; }
+dialog::backdrop { background: #132b3bb0; }
+dialog [role=alert] { color: #7b361b; }
+.report-compare pre { max-height: 28rem; overflow: auto; }

@@ -1,0 +1,61 @@
+name: Cross-platform setup
+
+on: [push, pull_request, workflow_dispatch]
+
+permissions:
+  contents: read
+
+jobs:
+  setup:
+    name: Installed-wheel setup (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-26.04, macos-15, windows-2025]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12.14"
+      - name: Bootstrap dev venv and run offline pytest
+        shell: bash
+        run: |
+          python -m venv .venv
+          bin=.venv/bin
+          uv=$bin/uv
+          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
+          "$bin/python" -m pip install --only-binary=:all: uv==0.13.9
+          "$uv" pip sync --python "$bin/python" --require-hashes --only-binary=:all: dev-deps.lock
+          "$bin/python" -m pytest -q -m 'not live'
+          node --check rah/static/app.js
+      - name: Build and bootstrap the wheel into a fresh environment
+        shell: bash
+        run: |
+          bin=.venv/bin
+          uv=$bin/uv
+          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
+          "$bin/python" scripts/bundle_hub.py --system-python \
+            --uv "$uv" \
+            --bundle "$RUNNER_TEMP/rah-bootstrap" --venv "$RUNNER_TEMP/rah-installed"
+      - name: Test installed setup, retained native entry points, and failure isolation
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            rah_python="$RUNNER_TEMP/rah-installed/Scripts/python.exe"
+            uv=.venv/Scripts/uv.exe
+          else
+            rah_python="$RUNNER_TEMP/rah-installed/bin/python"
+            uv=.venv/bin/uv
+          fi
+          "$rah_python" tests/smoke_setup.py --uv "$uv" --shortcut --report reports/setup.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: rah-setup-report-${{ matrix.runner }}
+          path: reports/setup.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rah-bootstrap-${{ matrix.runner }}
+          path: ${{ runner.temp }}/rah-bootstrap

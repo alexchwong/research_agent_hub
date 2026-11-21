@@ -1,0 +1,396 @@
+# Research Agent Hub — Product and Phased Delivery Plan
+
+**Plan version:** 2.0  
+**Date:** 21 November 2026 (Australia/Sydney)  
+**Proposed repository:** `alexchwong/research_agent_hub`  
+**First software release:** `0.1.0`  
+**Status:** Revised product brief for the technical specifications. Upstream deployment and live acceptance remain to be verified.
+
+> **Mission:** Build a small, approachable control room for installing, configuring, launching and using established research applications together. The research applications do the research. Research Agent Hub (RAH) does not become a research agent, a research engine or an agentic harness.
+
+## How to read this plan
+
+| Marker | Meaning |
+|---|---|
+| 🟥 **Non-negotiable** | Binding product constraint; cannot be designed away in the technical specifications |
+| 🟩 **Core / release 0.1.0** | The first useful product and its three required research applications |
+| 🟦 **RAH control-room capability** | Shared settings, installation, monitoring, native launchers and deterministic handoffs |
+| 🟪 **Optional extension** | Only installed after explicit in-app user action |
+| 🟨 **Upstream-dependent** | Must be checked against actual upstream releases and their documented interfaces |
+
+---
+
+## 1. Why this project is starting again
+
+The earlier `research_agent_hub` implementation developed into a bespoke research pipeline and an increasingly complex research application. This was a departure from the original request: **a convenient wrapper around existing, independently capable, open-source research applications**.
+
+The previous repository has been deleted by the owner. Reuse the name `research_agent_hub`, but **do not bring forward the discarded implementation, assumptions, databases, workflows, models, agent logic or architecture**. Begin a clean product from version `0.1.0`. The old project is not a compatibility target and there is no migration requirement.
+
+The intended experience is similar to a simple software control room:
+
+1. Install RAH and the three core research applications.
+2. Configure OpenRouter once if desired, with per-app and per-role choices where supported. Supply other native-provider credentials when a route requires them.
+3. Select an app or a predefined *way of working*; use each application's own research capabilities, including native deep-research and multi-agent modes.
+4. See status, outputs and OpenRouter spending in one place.
+5. Transfer research outputs and user-acquired PDFs to another supported app with minimal manual copying.
+6. When ready, discover and install further research applications **inside RAH**, rather than expanding the initial installation.
+
+**Successful product:** a user can perform real research with existing engines from a coherent dashboard, without encountering an extra artificial agent hierarchy, custom research pipeline or complicated configuration maze.
+
+**Unsuccessful product:** RAH itself starts searching PubMed, deciding which sources are relevant, planning tasks, controlling subagents, generating research answers or validating citations independently of the upstream applications.
+
+## 2. 🟥 Mandatory non-negotiable boundaries
+
+**Every future plan, specification, implementation review and release checklist must contain a section confirming compliance with these boundaries.** The technical-specification author must explicitly trace each proposed subsystem to one of the permitted responsibilities below. These requirements outrank convenience, uniformity and engineering elegance.
+
+### B1. Never implement an agentic harness
+
+RAH must not contain its own agent loop, planner, model-directed tool selection, subagent delegation, multi-agent manager, research strategy engine, autonomous workflow orchestrator, synthesis agent or reasoning engine. Do not quietly recreate AgentWiz or GPT Researcher inside this program. **All deep and multi-agent reasoning belongs to the selected upstream application.**
+
+A thin, *deterministic*, user-visible controller is permitted: starting an app, applying supported settings, invoking its documented entry point, observing its result, importing/exporting files, and opening the next app when the user chooses. No LLM in RAH should decide which step or tool to run.
+
+### B2. Do not reimplement, fork or alter the upstream research apps
+
+Use supported upstream distributions and public configuration/launch interfaces. An integration must not rely on maintaining a patched upstream fork or replicating an app's search, crawler, RAG, citation, report or agent components. An upstream engine should remain usable **directly through its native interface** even if RAH is closed or uninstalled.
+
+Where an upstream feature cannot be controlled from the hub, **open the native UI** rather than building a substitute. A narrower RAH integration is acceptable; a restricted upstream research experience is not.
+
+### B3. Preserve native capability and user choice
+
+RAH should expose common settings and convenient actions, not limit which native model, research mode, source, search service, output format or tool a supported upstream app can use. Support native UI access, advanced upstream configuration, and upstream-specific credentials/settings that do not have a shared equivalent.
+
+A common OpenRouter setting is a convenience, **not a rule that all applications must use only one provider**. If an upstream capability requires another provider or service, explain this and allow the upstream's documented configuration. Never falsely claim OpenRouter support for an upstream route that lacks it.
+
+### B4. Small core installation; optional apps installed only on demand
+
+The initial setup installs RAH and **exactly the three initial research applications**—Local Deep Research, GPT Researcher and PaperQA2—plus genuine essential dependencies. No phase-two/three app, optional research backend or large advanced multi-agent extension is installed merely because it appears in the catalogue.
+
+Each optional app must be clearly described and installed through an explicit in-app action. Failure, cancellation, update or removal of an optional app must not damage RAH or the three core apps. Apply the same initial-install boundary to upstream bundles that include optional services, models or extensions. Offer those extras separately and disclose their prerequisites before installation.
+
+### B5. Shared `.env`, with honest effective settings
+
+RAH must offer one understandable `.env`-based configuration entry point for **every upstream application it wraps**, including application-specific provider keys, model roles and native settings. RAH may translate this configuration into the documented forms upstreams require. It must not silently discard native settings, overwrite manual changes without warning or pretend that an app has adopted a choice it has not.
+
+Secrets never belong in Git, published logs, screenshots, exported workflow recipes or copied research artifacts. Each app receives only the credentials required for its configured route. A blank `.env.example` belongs in the repository; the populated `.env` must be secured and Git-ignored.
+
+### B6. Cost visibility, not RAH-imposed budgets
+
+**Remove all RAH-controlled spending ceilings, virtual-key budget engines, hard-stop claims and mandatory billing gateways from the plan.** RAH monitors OpenRouter spending and explains attribution limitations. Users may use a given upstream app's **own** limits—such as maximum search rounds, iterations or tokens—if those are natively supported; OpenRouter account/key controls also remain external options.
+
+RAH must distinguish actual OpenRouter charges from estimates, and known costs from charges outside OpenRouter. Never invent per-app or per-run spending allocations from an undifferentiated shared key.
+
+### B7. Human control of paywalled papers and private files
+
+A paper-identification workflow must allow users to see which relevant full texts are missing, download articles through their own lawful access and supply the PDFs. RAH must not bypass paywalls, automate institutional logins, copy browser cookies or imply that a missing PDF proves an article is paywalled. User-supplied full texts must not be silently uploaded to cloud services. Show the receiving app, the selected material and any onward destinations before each relevant handoff. Treat extracts, images and metadata from private files as part of the disclosure. Require explicit approval before any cloud transfer, even when the receiving app runs locally. If the relevant data flows cannot be verified, withhold the hub handoff and let the user choose a verified route or open the native app without forwarding the material.
+
+### B8. Fresh implementation and disciplined repository operation
+
+No migration of the deleted RAH codebase. Maintain clear documentation ownership and AgentWiz-like review/release hygiene. New dependencies and optional software remain subject to owner approval before inclusion in a supported install path. The in-app install action is the end user's separate decision to proceed. **No commit, push or release is implied by this plan.**
+
+## 3. Product scope — one hub, independent engines
+
+Use a local browser dashboard with an ordinary desktop shortcut.
+
+- **Apps** shows install and readiness status, native launchers and diagnostics, and install or update actions where supported. Put useful native research-mode shortcuts on the relevant app page.
+- **Workflows** shows curated recipes and links to **Papers Needed** for citation review and selected PDF handoffs.
+- **Usage** shows OpenRouter-reported usage and its coverage.
+- **Settings** covers common and per-app model options, provider/search credentials and links to native advanced controls.
+
+Bind the dashboard to loopback by default. Validate the expected local host and request origin and protect settings changes, installs, launches and file transfers from unrelated websites. For hub-managed upstream services, use documented deployment settings to keep access local. Prefer opening native results in their own interfaces.
+
+### What RAH owns versus what upstreams own
+
+| RAH owns 🟦 | Upstream applications own 🟩 |
+|---|---|
+| Install, update, remove and open supported apps | Research planning and decomposition |
+| Common settings and native configuration handoff | Queries, searching, crawling and retrieval |
+| Model-selection UI reflecting native roles | Agent loops and multi-agent orchestration |
+| Status, health, logs and links to native results | Evidence selection, analysis and report writing |
+| OpenRouter cost reporting | Native token/iteration/budget settings |
+| Paper-request checklists and file associations | Document interpretation and citation generation |
+| Deterministic workflow recipes and user-approved file transfer | Native deep-research / multi-agent modes |
+
+## 4. Planned upstream application collection
+
+The following is the **intended catalogue**, not a claim that every adapter or feature has been tested. The technical specifications must validate each upstream's current licence, maintenance status, releases, installation requirements, public interfaces, supported models and output formats before freezing the corresponding phase.
+
+| Phase | Application | Intended use | Integration principle |
+|---|---|---|---|
+| 🟩 **0.1.0** | [Local Deep Research](https://github.com/LearningCircuit/local-deep-research) (LDR) | Broad web and academic research, including paper discovery | Launch the native UI, apply documented model settings and open native results |
+| 🟩 **0.1.0** | [GPT Researcher](https://github.com/assafelovic/gpt-researcher) | General and deep research with cited reports | Launch a documented native interface, apply supported settings and export or reference its reports |
+| 🟩 **0.1.0** | [PaperQA2](https://github.com/Future-House/paper-qa) | Question answering and analysis of user-supplied full-text papers | Configure native models and embedding settings; select PDF corpus; run documented CLI/API |
+| 🟪 **0.2.0** | [Co-STORM / STORM](https://github.com/stanford-oval/storm) | Collaborative, multi-perspective knowledge curation | Optional install, native execution and validated input/output handoff |
+| 🟪 **0.2.0** | [SearchClaw](https://github.com/RUC-NLPIR/SearchClaw) | Additional search/research engine for independent corroboration | Optional install, native execution and validated handoff |
+| 🟪 **0.3.0** | [DeerFlow](https://github.com/bytedance/deer-flow) | Its own long-running, multi-tool research tasks | Optional native UI; no adoption of its agent framework inside RAH |
+| 🟪 **0.3.0** | [Vane](https://github.com/ItzCrazyKns/Vane) | Conversational search / alternative research interface | Optional native UI and supported model settings |
+| 🟪 **0.3.0** | [SurfSense](https://github.com/MODSetter/SurfSense) | Research over personal/private document collections | Optional native corpus and UI; avoid copying its RAG mechanisms |
+| 🟪 **0.3.0** | [Deep Research Web UI](https://github.com/AnotiaWang/deep-research-web-ui) | Additional native deep-research browser experience | Optional native UI and documented settings |
+
+**Complementary tools, not phase-one research apps:** SearXNG may be a supported optional search backend for engines that natively accept it. Zotero, institutional library links and LibKey may assist human paper acquisition. Keep these tools out of the base installation. Any additional catalogue candidate needs evidence of meaningful distinct utility and a review of maintenance, security, host requirements and overlap.
+
+## 5. 🟩 Release 0.1.0 — useful three-app research control room
+
+**Objective.** Make the three core apps practical to install, configure, launch and use together. Target Windows 11, macOS and Ubuntu Linux. Before freezing the spec, prove one viable clean-install route for all three apps on each target. Record supported OS and architecture combinations, prerequisites and any compatibility layer. Test the full setup on each advertised combination. Escalate a blocked target or core app to the owner before changing release scope.
+
+### 5.1 Initial installation and daily operation
+
+Use one documented, pinned installation route per platform. Detect prerequisites, disclose which services and packages the route installs, and guide any manual prerequisite setup. Initial setup installs RAH, LDR, GPT Researcher, PaperQA2 and their approved essential dependencies only. Audit upstream bundles before adopting them. For example, LDR's recommended Compose quickstart bundles Ollama and SearXNG, so use a supported core route that excludes them. Choose the smallest supported GPT Researcher distribution that provides the required native research and report access. Use PaperQA2's supported CLI or Python API. [LDR installation guide](https://github.com/LearningCircuit/local-deep-research/blob/main/docs/installation.md) · [GPT Researcher deployment options](https://docs.gptr.dev/docs/gpt-researcher/getting-started/how-to-choose) · [PaperQA2 CLI](https://github.com/Future-House/paper-qa#cli-usage)
+
+Show the installed version, readiness, native launch and a route to native troubleshooting. A CLI app can report availability to run. Offer stop controls only for processes the hub starts and can identify. Verify that the apps can coexist without port or configuration conflicts. Provide a native launch path that works with the hub closed and after hub removal, preserving upstream installations, settings and user data.
+
+### 5.2 Common OpenRouter configuration and unrestricted models
+
+Provide a protected user `.env`, a blank `.env.example` and guided controls for common settings. Document per-app passthrough for supported native settings that have no hub control. Translate settings through the pinned app's supported interface, such as its process environment, CLI arguments for non-secret settings or a native config file. Scope credential delivery to the app and configured endpoint. Use a separate credential for a custom endpoint. Keep the shared `.env` and optional usage credentials out of upstream processes and services. Preserve unrelated entries and manual native changes.
+
+For hub-managed settings, explicit per-app and per-role choices take precedence over compatible shared defaults. Document how those values interact with native settings, which controls upstream overrides lock, and when a restart is needed. Give users a documented way to release hub overrides and return control to the native UI or config. Distinguish configured values from confirmed active values. If the hub cannot determine an active value, direct users to the native app to verify it.
+
+Use role-appropriate model dropdowns where a verified upstream list or provider catalogue is available. Permit documented custom model IDs and native providers. A shared OpenRouter credential is optional and applies only to verified OpenRouter routes and supported roles. Keep separate embedding, search and other provider settings where required. Test chat and embedding support separately. OpenRouter publishes an embeddings API, but support in any given upstream adapter and version requires verification. [OpenRouter embeddings API](https://openrouter.ai/docs/api/api-reference/embeddings/list-embeddings-models) · [GPT Researcher model settings](https://github.com/assafelovic/gpt-researcher/blob/main/docs/docs/gpt-researcher/llms/llms.md) · [LDR configuration](https://github.com/LearningCircuit/local-deep-research/blob/main/docs/faq.md)
+
+### 5.3 Native deep research and multi-agent research
+
+Provide access to documented native modes available in the pinned upstream. Use their native names and open their native interface by default. Add direct launch only when a documented entry point is verified and saves a meaningful step. If a native mode requires an optional extension or service, disclose it and seek separate approval before installation.
+
+### 5.4 OpenRouter usage and cost monitoring
+
+For 0.1.0, show the shared key's OpenRouter-reported usage for the periods the current-key endpoint provides. Show currency, scope, reporting period and last successful refresh. An on-demand refresh and an OpenRouter dashboard link suffice. A shared-key total can include use outside RAH. Show missing data as unavailable and mark stale snapshots. Distinguish OpenRouter charges from any separate bring-your-own-key (BYOK) usage figures and untracked external expenses. [OpenRouter current-key API](https://openrouter.ai/docs/api/api-reference/api-keys/get-current-api-key)
+
+Historical charts, model breakdowns and app/run attribution are optional enhancements. Prefer a link to OpenRouter's native analytics. If RAH later offers management-key analytics, keep this credential optional and confined to the hub, with results labelled by scope. The activity endpoint provides up to 30 completed UTC days grouped by endpoint and supports key filtering. App/run labels require verified attribution beyond a shared key. [OpenRouter activity API](https://openrouter.ai/docs/api/api-reference/analytics/get-user-activity)
+
+RAH provides monitoring only. Users can access native app limits and OpenRouter controls through their own interfaces. External search, model, embedding and subscription costs stay outside reported OpenRouter totals.
+
+### 5.5 Research outputs, project folders and file handoffs
+
+Users should be able to retain original research outputs in understandable, user-owned project folders and inspect them without digging through app-specific temporary directories. The upstream application remains the authoritative producer of its report, citation list and other artifacts.
+
+RAH may record file paths, native result URLs, app/version, timestamp and selected inputs to help the user find work again. It must **not** generate a competing source-of-truth report, score papers, merge conclusions via an LLM or invent a new citation-provenance subsystem.
+
+Provide a practical handoff into PaperQA2 through its supported indexing/run interface. The user selects PDFs or approves the corpus in a dedicated folder. Scope the native index and run to that selection, including any reused index. Preserve the original PDFs and provide access to the native answer and citations.
+
+Confirm file selection and the receiving app before transfer. Before indexing or analysing, disclose which configured model, embedding, parsing and metadata services can receive material and what each receives. Require approval for remote disclosure under B7. Reconfirm if the selected corpus or destinations change before the run. For PaperQA2, verify model and embedding defaults and Crossref/Semantic Scholar calls on the pinned route. [PaperQA2 model settings](https://github.com/Future-House/paper-qa#choosing-model) · [PaperQA2 CLI](https://github.com/Future-House/paper-qa#cli-usage)
+
+### 5.6 The **Papers Needed** checkpoint is part of 0.1.0
+
+Show a simple, user-curated list from upstream citations or user-selected entries. Show available title, DOI, PMID or citation URL and any upstream relevance note. Use three states:
+
+- **Full text needed** means the entry has no suitable full text associated with it. Availability and access may be unknown.
+- **PDF supplied** means the user associated a file or confirmed an upstream-acquired PDF.
+- **Skipped** means the user chose to proceed without the paper.
+
+Use structured output when a documented interface provides it. Otherwise allow selection, paste or manual entry. The user obtains missing PDFs through lawful access and confirms ambiguous matches. RAH checks basic file suitability and offers **Continue in PaperQA2** for selected PDFs after handoff approval under §5.5. Users may proceed with a subset. Label abstract-only material explicitly and identify which full texts PaperQA2 actually analysed where its output provides that information.
+
+### 5.7 Starter workflow library
+
+Ship a small set of fixed recipes in the first release. Demonstrate the academic literature survey end to end. Additional recipes can be short guides with verified manual steps. Each recipe states its purpose, native apps, inputs and outputs, possible costs and human checkpoints.
+
+Starter recipes:
+
+1. **Academic literature survey:** LDR discovers and curates candidates → user reviews candidates and acquires missing PDFs → PaperQA2 analyses selected full texts.
+2. **Deep research to paper analysis:** GPT Researcher produces cited research → select relevant articles/PDFs → PaperQA2 follows up on supplied full texts.
+3. **Broad-to-deep investigation.** LDR explores a broad topic → the user brings a follow-up question to GPT Researcher. Transfer a report only if the pinned app has a verified input route and the user approves it.
+4. **Independent report comparison:** run LDR and GPT Researcher separately → open their two native reports side-by-side for human comparison; **RAH does not write a combined judgement**.
+
+These are *recipes and handoffs*, not a home-grown workflow engine. The system may populate an upstream input from a selected existing output and open the next application. It must not autonomously plan new research, infer missing steps or insert an LLM-based synthesiser between apps.
+
+```mermaid
+flowchart TD
+  L["Native paper discovery"] --> P["Review citations in Papers Needed"]
+  P --> S["Acquire or select PDFs"]
+  S --> A{"Approve selected files and destinations?"}
+  A -->|"Yes"| Q["Run native PaperQA2 analysis"]
+  A -->|"No"| H["Keep checklist for later"]
+```
+
+### 5.8 Definition of done for 0.1.0
+
+Demonstrate these checks on real upstream installations:
+
+- On each advertised host combination, the installed package and desktop shortcut work. The three pinned core apps launch independently, coexist and work through their documented native launch path with RAH closed. Verify the same path after removing only the hub. Base setup installs the three core apps and approved essential dependencies.
+- Verify supported OpenRouter mappings for each core app and representative per-role overrides. Where a role requires a different provider, demonstrate that native route and label it. Native advanced controls remain available.
+- LDR and GPT Researcher produce their own cited results. PaperQA2 analyses a selected, non-sensitive PDF corpus through its native interface. Demonstrate access to documented native research modes under the relevant install profile.
+- Demonstrate the academic literature survey end to end with upstream citations, manual fallback, human PDF acquisition, selected-corpus analysis and explicit handoff approval. Check that declining approval sends nothing, that an unverified destination blocks the hub handoff, and that a PDF outside the approved corpus is excluded even when a native index already exists.
+- With an authorised test key, verify the Usage view against a real OpenRouter response. Exercise missing credentials and provider errors separately. Spending information never controls launch or execution.
+- Check that a failed or missing app leaves the dashboard and other core apps usable. Verify browser request protections, secret redaction, scoped credential delivery, and that installs and billable live checks occur only after the respective approvals.
+
+## 6. 🟪 Release 0.2.0 — two optional research applications
+
+**Objective:** introduce a reliable in-app extension catalogue without growing the base installation. The first two optional applications are **Co-STORM and SearchClaw**.
+
+An **Apps → Browse / Install** screen should let the user see what an optional app does, required disk/resources/credentials, upstream version and relevant security/network implications. The user explicitly chooses Install. RAH installs only an owner-approved, pinned upstream distribution and its disclosed prerequisites. Isolate its runtime, configuration and update operations to satisfy B4. Report progress and errors. Use documented open, update and removal paths and preserve user data by default.
+
+Co-STORM and SearchClaw must remain usable via their own interfaces and should receive the same common `.env`/model-configuration treatment as the phase-one apps, including additional native settings and non-OpenRouter providers where required. Do not simplify away their distinct research modes or rewrite their native execution methods.
+
+Add a small number of useful recipes using these apps, for example:
+
+- **Multiple perspectives:** LDR or GPT Researcher native research material → Co-STORM's documented native input path, if supported.
+- **Independent corroboration:** research using one core app → SearchClaw launched against a user-approved question or exported input, with its own native result displayed separately.
+
+A recipe should be marked **manual** if the upstream cannot accept the proposed input programmatically. Never imply seamless automatic transfer in the absence of a verified interface. If a particular integration needs a large optional service, disclose it and install only after approval.
+
+**0.2.0 is done when** both approved apps install only on demand and run independently, documented settings work, and a practical handoff for each is demonstrated, including any manual steps. Verify the documented install, update and removal paths, including failures and cancellations, against a working core. Shared-key usage is included in the key total. App-level figures require verified attribution. Escalate a blocked app to the owner before changing scope.
+
+## 7. 🟪 Release 0.3.0 — remaining optional applications
+
+**Objective:** extend the catalogue to **DeerFlow, Vane, SurfSense and Deep Research Web UI**, while keeping the same small initial installation, UI conventions and no-harness boundary.
+
+The technical spec author must first verify each project's current identity, licence, health, native interfaces, model/provider options, host requirements and role overlap. An app that cannot be installed safely or used reliably should be identified as **deferred**, with the reason recorded. Existing installed apps should stay functional even when a new one is incompatible.
+
+These additions may bring document indexes, databases, vector backends, model providers and other substantial services. Such services belong to the optional app's installation, not the base RAH product. Leave each upstream's corpus, embeddings, retrieval and long-running agent machinery within that upstream app.
+
+Expand workflow recipes only where there is a real cross-app benefit. Possibilities include a user-approved handoff into SurfSense's own corpus interface and a comparison of native results from independent engines. There is no requirement to connect every possible pair of applications; value, reliability and actual upstream interfaces are more important than combinatorial coverage.
+
+**0.3.0 is done when** every app listed as installable passes the 0.2.0 installation, isolation and native operation checks. Demonstrate documented handoffs where supported. Record deferred candidates and reasons. Verify the core both on a clean core-only install and after attempted installs or removal of optional apps.
+
+## 8. 🟦 Workflow library — long-term direction without a harness
+
+The workflow library should become RAH's distinctive convenience feature: **a curated catalogue of reliable ways to use existing apps together**.
+
+A workflow recipe is a **fixed, understandable operating guide** with app requirements, intended sequence, expected file formats, approved input handoffs and explicit checkpoints. It is not an agent, prompt-driven planner or autonomous execution graph.
+
+Each library entry should communicate:
+
+- its purpose, expected value and typical source material;
+- which upstream applications must already be installed;
+- which upstream native research mode to use (if any);
+- what the user must review or supply before advancing;
+- what content is transferred, to which app, and by which upstream-supported mechanism;
+- how to resume an incomplete handoff and find the original output;
+- any cloud disclosure, provider costs or access limitations;
+- a fall-back manual procedure if a native API/CLI handoff is unavailable.
+
+**Seamlessness means fewer avoidable copy/paste operations, not hidden autonomy.** Where documented APIs exist, RAH can help choose an existing output, prefill a supported input and open the next app. Where they do not, show clear instructions and point to the correct native UI. Upstream apps retain ownership of tasks, research state and reports. The user stays in charge of choosing the next workflow step.
+
+Version the starter guides with the app and check them against pinned upstream versions. A checklist, links to native outputs and explicit handoff actions suffice. Document how to resume by reopening the checklist and original outputs. Keep research state and progress in the native apps.
+
+## 9. 🟦 Repository, documentation and development expectations
+
+Use the same general organisation and standards as AgentWiz, **adapted to a smaller wrapper product**. The repo begins with these top-level items, as appropriate to the final technical design:
+
+```text
+research_agent_hub/
+├── .clinerules               # Short assistant/reviewer instructions
+├── .env.example              # Documented, blank configuration template
+├── .gitignore                # Always exclude actual credentials and user data
+├── .github/workflows/        # CI and release automation
+├── DEVEL.md                  # Developer rules, setup and check commands
+├── NEWS.md                   # User-facing release changes by version
+├── README.md                 # Install, configure, use, update, troubleshooting
+├── LICENSE
+├── pyproject.toml            # Or equally appropriate packaging manifest
+├── docs/
+│   ├── architecture.md       # Implementation contracts once specified
+│   ├── decisions.md          # Owner decisions and approved departures
+│   ├── releases.md           # Build, acceptance and publishing workflow
+│   ├── security.md           # Secrets, installation and data boundaries
+│   ├── integrations.md       # Verified upstream capabilities and limitations
+│   └── workflows.md          # Supported recipes, handoffs and human steps
+├── research_agent_hub/       # Thin app-specific adapters and local UI
+├── scripts/                  # Setup and smoke checks
+└── tests/                    # Offline and opt-in live checks
+```
+
+The technical-specification author chooses the language, framework and final layout. A short document can own several closely related topics in 0.1.0. Create dedicated files when they need independent maintenance.
+
+**Documentation ownership:**
+
+- `.clinerules` is short and points to `DEVEL.md`; avoid duplicated policy.
+- `DEVEL.md` owns standing coding-agent/maintainer directives, offline/test commands and live-check quickstart.
+- `README.md` is the user's entry point: supported operating systems, simple installation, one `.env`, models, usage dashboard and examples.
+- `NEWS.md` records what changed in each release starting with `0.1.0`.
+- `docs/architecture.md` and `docs/integrations.md` capture technical contracts, native interface assumptions and verified app/version capability matrices.
+- `docs/decisions.md` records deviations and owner approvals; `docs/releases.md` owns repeatable packaging and release gates.
+- `docs/workflows.md` describes the recipe catalogue and its manual/automatic handoffs.
+
+Do not accumulate disposable handover reports or copy permanent instructions into several documents. The real populated `.env` and runtime data are outside Git and protected from export/commits. **Do not commit, push, create a release or install unapproved dependencies without explicit instruction.**
+
+### Development and acceptance approach
+
+Prefer objective, automated checks of app detection, safe setup, configuration translation, supported UI/CLI/HTTP integration, file handoffs and start/stop/error behaviour. CI should run credential-free with fakes for external endpoints. Where possible, add **opt-in live smoke scripts** using a real upstream installation and user-provided keys; document exactly what each live check sends and could cost.
+
+Use installed-package and desktop/browser smoke testing on **Windows 11, macOS and Ubuntu Linux**; describe unsupported OS or upstream combinations accurately rather than silently substituting other backends. Verify failure paths, secrets redaction, cross-app isolation and a core-only installation after optional-app failures. Keep phase gates in the release checklist and use §5.8 to verify the core.
+
+## 10. Delivery sequence and decisions already made
+
+| Product decision | Direction |
+|---|---|
+| Product/repository name | **Research Agent Hub**, `research_agent_hub` |
+| Starting codebase | Fresh; old repository deleted; **no migration** |
+| First software version | **0.1.0** |
+| Core | **Local Deep Research, GPT Researcher, PaperQA2** |
+| Phase-two optional apps | **Co-STORM, SearchClaw** in **0.2.0** |
+| Phase-three optional apps | **DeerFlow, Vane, SurfSense, Deep Research Web UI** in **0.3.0** |
+| Installation philosophy | Three core apps first; all further supported apps install **from inside RAH** |
+| Models | Common OpenRouter `.env`, dropdowns, per-app/role overrides; preserve native providers |
+| Credentials | `.env` supports every wrapped app and its documented native configuration |
+| Spending | **Monitoring only**; optional upstream-native controls, **no RAH budget limits** |
+| Research intelligence | **100% upstream-owned**; no RAH agentic harness or research engine |
+| Workflow library | Predefined, deterministic, human-understandable app-to-app handoffs |
+| Missing full text | Required human **Papers Needed** acquisition checkpoint in **0.1.0** |
+| Engineering practice | AgentWiz-style `.clinerules`, `DEVEL.md`, `NEWS.md`, `README.md`, CI, tests and docs |
+
+## 11. Instructions to the technical-specification author
+
+This document is **product direction, not a design document**. Produce technical specifications for each phase **without broadening the product**. For every proposed technical component, explain the user requirement it satisfies and verify that it is a small, deterministic control-room capability rather than a new research engine.
+
+The specifications should decide, based on investigation and evidence:
+
+1. The smallest maintainable cross-platform packaging, local browser UI and launcher arrangement.
+2. Exact upstream versions, licences, prerequisites and documented interfaces for each release.
+3. Each app's native entry point and supported settings mapping. Specify direct run or file/result handoff only where verified and needed for the phase.
+4. The `.env` schema, secrets handling, configuration precedence, native passthrough and model dropdown discovery across app-specific roles.
+5. Current-key usage mapping, refresh behaviour, reporting periods, failure states and attribution limits.
+6. The minimal checklist and file references, selected PaperQA2 corpus and data destinations shown for handoff approval.
+7. How each starter workflow operates, including manual checkpoints and supported API/CLI handoffs; the recovery story after an interrupted run or missing PDF.
+8. In-app optional installation, update/removal, dependency disclosure, rollback/failure isolation and cross-platform behaviour.
+9. The release-by-release automated checks and optional live smoke tests.
+10. The minimal scope needed to ship each phase; defer elaborate controls, integrations and graphical workflow editing unless justified by a tested user need.
+
+**Required specification deliverables.** Provide a product recap, a B1–B8 compliance section, the integration matrix, phase-specific acceptance gates and a bounded build sequence. For each pinned route record platform, licence, install source, essential and optional dependencies, standalone launch, configuration precedence, supported model roles and providers, data destinations and a native smoke check. Record compatibility questions with the smallest check that can settle each one. Raise genuine blockers before changing commitments.
+
+## 12. Risks and limitations to carry into every phase
+
+| Risk / limitation | Required stance |
+|---|---|
+| 🟨 Upstream projects change or expose inconsistent APIs | Pin compatible releases, verify interfaces, allow native UI/manual handoff and explain unsupported automation |
+| 🟨 Cross-platform dependencies vary | Prove the three-app install on each target and escalate blocked targets before changing scope |
+| 🟨 One OpenRouter key does not identify each app's spending | Show real aggregate totals; show per-app/run figures only with trustworthy native or API attribution |
+| 🟨 Some providers/search services bill outside OpenRouter | Label those costs as external or untracked rather than adding speculative estimates to actual charges |
+| 🟨 Upstream multi-agent research can be expensive | Expose native model/iteration controls and observed costs; do not impose RAH limits or promise 1–5 cent deep research |
+| 🟨 Missing papers are not necessarily paywalled | Human selection and lawful acquisition; manual metadata matching when upstream outputs are incomplete |
+| 🟥 Local apps may send material to remote services | Verify the selected corpus and onward destinations, then require explicit approval before remote disclosure |
+| 🟥 Feature creep into agent orchestration | Reject proposed custom planners, autonomous research loops, report synthesis and new citation engines; use native apps |
+| 🟨 Optional apps may overlap or be poorly maintained | Verify distinct user value and maintenance before declaring an app supported; defer unsafe/unsupported candidates |
+
+**Final instruction:** Research Agent Hub succeeds by remaining **small, reliable and permissive toward the capabilities of the applications it wraps**. The point of the technical specifications is to make those integration and installation experiences work—not to enlarge RAH into an agentic platform.
+
+---
+
+### Upstream starting points for verification (not claims of current compatibility)
+
+- [Local Deep Research](https://github.com/LearningCircuit/local-deep-research)
+- [GPT Researcher](https://github.com/assafelovic/gpt-researcher)
+- [PaperQA2 / paper-qa](https://github.com/Future-House/paper-qa)
+- [Co-STORM / STORM](https://github.com/stanford-oval/storm)
+- [SearchClaw](https://github.com/RUC-NLPIR/SearchClaw)
+- [DeerFlow](https://github.com/bytedance/deer-flow)
+- [Vane](https://github.com/ItzCrazyKns/Vane)
+- [SurfSense](https://github.com/MODSetter/SurfSense)
+- [Deep Research Web UI](https://github.com/AnotiaWang/deep-research-web-ui)
+- [OpenRouter documentation](https://openrouter.ai/docs)
+
+### Review decisions in v2 and mandatory-boundary check
+
+| Priority | Finding in v1 | Resolution in v2 |
+|---|---|---|
+| Critical | A local app could send PDF extracts, images or metadata to remote services during indexing or analysis | Verify the selected corpus and onward destinations before approval. Withhold unverified hub handoffs. Test rejection and corpus isolation (§§5.5–5.8, B7). |
+| Critical | An upstream bundle could install optional services, while the platform exception could let an incomplete target pass | Prove a compliant three-app route on each target, verify standalone launch after hub removal and escalate blocked targets (§§5.1, 5.8, B2/B4/B8). |
+| High | Shared settings could spread credentials, mask conflicting native values or lock native controls | Scope settings and credentials, document precedence, allow users to release overrides and distinguish configured from active values (§5.2, B3/B5). |
+| High | Privileged local browser actions lacked an explicit trust boundary | Bind the dashboard to loopback by default and protect privileged actions from unrelated websites (§3, B5/B7/B8). |
+| High | Usage history and attribution were underspecified, and unavailable data could pass the release check | Require a live check of scoped key totals. Mark unavailable data and external costs. Link to provider analytics by default (§§5.4, 5.8, B6). |
+| High | Optional-app isolation and phase acceptance could be read as best effort | Require core functionality after failed or cancelled lifecycle operations. Demonstrate manual routes and record deferrals (§§6–7, B4/B8). |
+| Simplification | A separate research dashboard, normalised modes, overlapping paper states and managed-run tiers expanded the wrapper | Use native entry points, a fixed recipe catalogue, one checklist and one required end-to-end core recipe (§§3, 5.3, 5.6–5.8, 8, B1–B3). |
+
+**Boundary check.** B1 keeps automated research decisions and execution with the upstream apps. B2 requires documented, standalone native operation. B3 protects native modes and provider choice. B4 fixes the three-app base and requires opt-in extras. B5 preserves the shared `.env` contract for every app and protects secrets. B6 limits RAH to usage monitoring. B7 keeps acquisition and private-file handoffs under user control. B8 preserves the fresh start and owner approval requirements.
+
+**Remaining verification.** This review checked published upstream documentation. The spec author still needs to run the pinned three-app installs on each target, verify role-specific provider mappings, and confirm PaperQA2's data destinations and selected-corpus behaviour.
+
+*End of product and phased delivery plan v2.0. No source code changes or Git operations are authorised by this document.*
