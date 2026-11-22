@@ -1,6 +1,6 @@
 # Mandatory rule assessment
 
-This argument is based on the product plan’s B1–B8 requirements and the technical v3 implementation. [handover.md](../handover.md) records the remaining acceptance checks.
+This argument is based on the product plan’s B1–B8 requirements and the technical v3 implementation. [releases.md](releases.md) records the remaining acceptance checks.
 
 | Rule | How the implementation follows it |
 |---|---|

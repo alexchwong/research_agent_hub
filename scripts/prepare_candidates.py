@@ -89,7 +89,7 @@ def generate(uv, destination, apps):
             "app_id": app, "platform": os_id, "arch": arch, "upstream_version": pin,
             "python_build": platform.python_version(), "artifacts": artifacts, "lock_path": lock.name,
             "lock_sha256": sha(lock), "licence": license_name, "notices": [name + " upstream distribution"],
-            "prerequisites": ["Managed Python 3.12", "Platform native libraries listed in handover.md"],
+            "prerequisites": ["Managed Python 3.12", "Platform native libraries listed in docs/releases.md"],
             "essential": [name + "==" + package, "hash-locked Python runtime dependencies"],
             "extras": ["Optional upstream providers, services and extended document formats are configured separately."],
             "estimated_bytes": None, "adapter_id": app, "native_entry": entry,

@@ -16,6 +16,7 @@ import webbrowser
 
 from waitress import create_server
 
+from . import settings
 from .common import Problem, atomic, child, clean_env, data_root, exclusive, prepare_root, read_json, write_json
 from .installer import RouteBook
 from .openrouter import NoRedirect
@@ -202,6 +203,7 @@ def main(argv=None):
                 raise Problem("uv_missing", "Pass the absolute path of the approved uv executable.")
             with exclusive(runtime(root, "instance.lock")):
                 RouteBook.load(args.bundle, args.qualification)
+                settings.seed(root)
                 if not args.no_shortcut:
                     register_shortcut(root)
                 write_json(runtime(root, "setup.json"), {"uv": str(args.uv), "bundle": str(args.bundle.resolve()) if args.bundle else None,

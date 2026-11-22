@@ -9,4 +9,4 @@ The hub serves a loopback dashboard and keeps the three upstreams in independent
 - `rah/worker.py` invokes native analysis with the approved subset in a fresh per-run home and index. It preserves the native result and bibliography.
 - `rah/openrouter.py` loads separate role catalogues and current-key usage from fixed endpoints.
 
-See [integrations.md](integrations.md) for native interfaces and [handover.md](../handover.md) for release evidence.
+See [integrations.md](integrations.md) for native interfaces and [releases.md](releases.md) for release evidence.

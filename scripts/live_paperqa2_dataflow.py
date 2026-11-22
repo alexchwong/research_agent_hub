@@ -6,7 +6,7 @@ Run from a research_agent_hub devel checkout:
 
 Uses the installed pinned PaperQA2 interpreter, RAH's unmodified rah/worker.py,
 synthetic PDFs only, and the RAH user config. Never unlocks a release gate.
-Requires only stdlib in the launching interpreter.
+Diagnostic mode requires only stdlib. Installed-hub mode uses the installed RAH interpreter.
 """
 from __future__ import annotations
 
@@ -15,6 +15,7 @@ import ast
 import base64
 from datetime import datetime, timezone
 import hashlib
+import io
 import importlib.metadata
 import importlib.util
 import json
@@ -33,7 +34,7 @@ from urllib.request import Request, build_opener, ProxyHandler, HTTPRedirectHand
 from urllib.error import HTTPError, URLError
 import zlib
 
-SCHEMA = "rah-paperqa2-dataflow-v2"
+SCHEMA = "rah-paperqa2-dataflow-v3"
 EXPECTED_PQA = "2026.8.12"
 MODELS = {"answer": "openai/gpt-4.1-mini", "summary": "openai/gpt-4.1-mini",
           "agent": "openai/gpt-4.1-mini", "embedding": "openai/text-embedding-3-small"}
@@ -52,11 +53,19 @@ def sha(path):
 def write_json(path, value):
     p = Path(path).expanduser().resolve()
     p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("w", encoding="utf-8") as out:
-        json.dump(value, out, indent=2, sort_keys=True)
-        out.write("\n")
-    if os.name != "nt":
-        p.chmod(0o600)
+    with tempfile.NamedTemporaryFile(dir=p.parent, mode="w", encoding="utf-8", delete=False) as out:
+        temporary = Path(out.name)
+        try:
+            json.dump(value, out, indent=2, sort_keys=True)
+            out.write("\n")
+        except BaseException:
+            out.close()
+            temporary.unlink(missing_ok=True)
+            raise
+    try:
+        temporary.replace(p)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def app_data_root():
@@ -284,6 +293,15 @@ class NetworkMonitor:
 
         def observe(response, entry):
             entry["status_code"] = int(response.status_code)
+            if 400 <= response.status_code < 500:
+                try:
+                    error = response.json().get("error", {})
+                    message = str(error.get("message", "")).lower()
+                    entry["routing_rejection"] = bool(re.search(
+                        r"no (?:available )?(?:endpoints|providers)|invalid provider|unknown provider|"
+                        r"provider.{0,70}(?:not found|not available|does not exist|not supported|invalid)", message))
+                except (AttributeError, ValueError, RuntimeError):
+                    pass
             try:
                 data = response.json()
                 if (isinstance(data, dict) and isinstance(data.get("id"), str)
@@ -326,16 +344,9 @@ class NetworkMonitor:
         httpx.Response.json = response_json
 
 
-def safe_error(exc, *, secret="", work=""):
-    """Bounded diagnostic, with credentials, canaries and temp paths removed."""
-    message = str(exc)
-    for sensitive in (secret, work, INCLUDED, EXCLUDED, METADATA):
-        if sensitive:
-            message = message.replace(sensitive, "[redacted]")
-    message = re.sub(r"(?i)(authorization|api[_ -]?key|bearer)[= :]+[^\s,;]+", r"\1=[redacted]", message)
-    message = re.sub(r"(?:sk-or-[A-Za-z0-9_-]+|sk-[A-Za-z0-9_-]{12,})", "[redacted]", message)
-    message = re.sub(r"[A-Za-z0-9_-]{100,}", "[redacted-long-token]", message)
-    return {"exception_type": type(exc).__name__, "safe_message": message[:280]}
+def safe_error(exc):
+    """Return only the exception type, without provider bodies or paths."""
+    return {"exception_type": type(exc).__name__}
 
 
 def child_main(input_file, result_file):
@@ -417,60 +428,41 @@ def child_main(input_file, result_file):
                     result = await run()
                     report["tests"]["probe_" + role] = {"status": "PASS" if result is not None else "FAIL"}
                 except Exception as exc:  # deliberately do not emit provider exception text
-                    report["tests"]["probe_" + role] = {"status": "FAIL", **safe_error(exc, secret=config["key"], work=str(work))}
+                    report["tests"]["probe_" + role] = {"status": "FAIL", **safe_error(exc)}
         with asyncio.Runner() as runner:
             runner.run(probes())
-        # A deliberately invalid provider must not fall back to any other provider.
-        monitor.phase = "negative_invalid_provider"
         invalid_provider = "RAH_NO_SUCH_PROVIDER_DO_NOT_FALLBACK_76239"
-        bad = {"id": "openrouter-text-v1", "destinations": [
-            dict(entry, provider=invalid_provider) if entry["role"] == "answer" else entry
-            for entry in profile["destinations"]]}
-        try:
+
+        async def negative(role):
+            monitor.phase = "negative_" + role
+            bad = {"id": profile["id"], "destinations": [
+                dict(entry, provider=invalid_provider) if entry["role"] == role else entry
+                for entry in profile["destinations"]]}
             bad_settings = Settings(**worker.paper_options(bad))
-            async def rejected():
-                return await bad_settings.get_llm().acompletion(
-                    [Message(role="user", content="Synthetic invalid provider test: respond OK")])
-            with asyncio.Runner() as runner:
-                runner.run(rejected())
-            report["tests"]["negative_invalid_provider"] = {"status": "FAIL", "reason": "unavailable_provider_accepted"}
-        except Exception as exc:
-            report["tests"]["negative_invalid_provider"] = {
-                "status": "PASS", "failure_type": type(exc).__name__}
+            try:
+                if role == "embedding":
+                    await bad_settings.get_embedding_model().embed_documents(["synthetic routing negative control"])
+                else:
+                    await bad_settings.get_llm().acompletion([Message(role="user", content="Synthetic routing negative control")])
+            except Exception as exc:
+                report["tests"][monitor.phase] = {"status": "REJECTED", "failure_type": type(exc).__name__}
+            else:
+                report["tests"][monitor.phase] = {"status": "FAIL", "reason": "unavailable_provider_accepted"}
+
+        with asyncio.Runner() as runner:
+            for role in ("answer", "embedding"):
+                runner.run(negative(role))
         monitor.phase = "native_pdf_index_and_answer"
         try:
             worker.paper({"profile": profile, "question": QUESTION}, work)
             answer = json.loads((work / "result.json").read_text(encoding="utf-8"))
             actual_answer = answer.get("answer", "")
             bib = answer.get("bib", "")
-            # The native worker persists session.formatted_answer, which can include
-            # a 'References' section independently of AnswerResponse.bibtex.
-            correct = bool(re.search(r"\b17\b", actual_answer)) and not bool(re.search(r"\b999\b", actual_answer))
-            references_heading = bool(re.search(r"(?im)^\s*References\s*$", actual_answer))
-            source_mention = any(x in actual_answer.lower() for x in
-                                 ("rah_selected", "rah selected", "rah synthetic study"))
-            citation_present = bool(bib.strip()) or (references_heading and source_mention)
-            sanitized_excerpt = actual_answer[:2000]
-            for value, marker in ((config["key"], "[secret]"), (INCLUDED, "[selected marker]"),
-                                  (EXCLUDED, "[excluded marker]"), (METADATA, "[metadata marker]")):
-                if value:
-                    sanitized_excerpt = sanitized_excerpt.replace(value, marker)
-            report["tests"]["native_pdf_index_and_answer"] = {
-                "status": "PASS" if correct and citation_present else
-                          "FAIL" if not correct else "INCONCLUSIVE",
-                "sample_size_17": bool(re.search(r"\b17\b", actual_answer)),
-                "forbidden_sample_size_999": bool(re.search(r"\b999\b", actual_answer)),
-                "citation_in_formatted_answer": references_heading and source_mention,
-                "reference_heading_present": references_heading,
-                "selected_source_mentioned": source_mention,
-                "native_bibliography_present": bool(bib.strip()),
-                "answer_excerpt_synthetic_only": sanitized_excerpt,
-                "answer_bytes": len(actual_answer.encode()),
-                "bibliography_bytes": len(bib.encode())}
+            report["tests"]["native_pdf_index_and_answer"] = answer_evidence(actual_answer, bib)
         except Exception as exc:
-            report["tests"]["native_pdf_index_and_answer"] = {"status": "FAIL", **safe_error(exc, secret=config["key"], work=str(work))}
+            report["tests"]["native_pdf_index_and_answer"] = {"status": "FAIL", **safe_error(exc)}
     except BaseException as exc:
-        report["tests"]["setup_or_execution"] = {"status": "FAIL", **safe_error(exc, secret=config.get("key", ""), work=config.get("work", ""))}
+        report["tests"]["setup_or_execution"] = {"status": "FAIL", **safe_error(exc)}
     finally:
         report["requests"] = monitor.requests
         report["blocked_connections"] = monitor.blocked
@@ -502,9 +494,127 @@ def metadata_review(key, ids):
     return results
 
 
+def answer_evidence(answer, bib=""):
+    has_size = bool(re.search(r"\b17\b", answer))
+    has_excluded = bool(re.search(r"\b999\b", answer)) or EXCLUDED in answer
+    parts = re.split(r"(?im)^\s*(?:#+\s*)?References:?\s*$", answer, maxsplit=1)
+    referenced = len(parts) == 2 and bool(re.search(r"(?i)\bpages?\s*\d+", parts[1])) and any(
+        text in parts[1].lower() for text in (INCLUDED.lower(), "synthetic journal report", "rah_selected"))
+    return {"status": "FAIL" if not has_size or has_excluded else "PASS" if referenced else "INCONCLUSIVE",
+            "sample_size_17": has_size, "forbidden_sample_size_999": has_excluded,
+            "citation_in_formatted_answer": referenced, "native_bibliography_present": bool(bib.strip())}
+
+
+def run_hub(root, key, worker, report, timeout):
+    from rah import installer, settings
+    from rah.common import file_digest
+    from rah.projects import Projects
+    from rah.web import create_app
+
+    checks = report["checks"]
+    route_book = installer.RouteBook.load()
+    route = route_book.route("pqa")
+    if not route or route.get("qualification_only"):
+        raise RuntimeError("No standard installed host route")
+    if Projects(root).list():
+        raise RuntimeError("Use a disposable RAH data directory with no projects")
+    evidence = {
+        "status": "verified", "profile": "openrouter-text-v1", "reference": "synthetic live test only",
+        "host": installer.host_identity(), "worker_sha256": file_digest(worker),
+        "lock_sha256": route["lock_sha256"], "python": platform.python_version(),
+        "upstream_version": route["upstream_version"], "policy": "single-provider-no-fallback",
+        "routes": {role: {model: "Azure"} for role, model in MODELS.items()},
+    }
+    packaged_evidence = route.get("paper_evidence")
+    if packaged_evidence and packaged_evidence.get("status") == "verified":
+        comparable = {name: value for name, value in evidence.items() if name != "reference"}
+        if any(packaged_evidence.get(name) != value for name, value in comparable.items()):
+            raise RuntimeError("The packaged route differs from the live candidate")
+    else:
+        route["paper_evidence"] = evidence
+    report["candidate_evidence"] = evidence | {"status": "candidate", "reference": "replace after review"}
+    report["environment"]["packaged_gate_enabled"] = bool(packaged_evidence and packaged_evidence.get("status") == "verified")
+    origin = "http://127.0.0.1:8500"
+    headers = {"Authorization": "Bearer synthetic-test", "Origin": origin}
+    client = create_app(root, route_book, None, "live-diagnostic", "synthetic-test",
+                        lambda: None, lambda: "127.0.0.1:8500").test_client()
+
+    def call(method, path, payload=None, status=200, **kwargs):
+        response = client.open("/api" + path, method=method, base_url=origin,
+                               headers=headers, json=payload, **kwargs)
+        if response.status_code != status:
+            code = (response.get_json(silent=True) or {}).get("code", "unknown")
+            report["hub_api_error"] = {"method": method, "status": response.status_code, "code": code}
+            raise RuntimeError("Hub verification API request failed")
+        return response.get_json() if response.is_json else response.get_data(as_text=True)
+
+    existing_key = settings.load(root).values.get("RAH_OPENROUTER_API_KEY")
+    if existing_key and existing_key != key:
+        raise RuntimeError("The disposable root already has a different OpenRouter key")
+    config = call("GET", "/settings")
+    saved = call("POST", "/settings", {"revision": config["revision"],
+        "changes": settings.PAPER_SUGGESTIONS | {"RAH_OPENROUTER_API_KEY": key}, "clear": []})
+    applied = call("POST", "/settings/apply", {"revision": saved["revision"]})
+    checks["hub_applied_roles"] = "pqa" not in applied["failures"]
+    if not checks["hub_applied_roles"]:
+        return
+    project_id = call("POST", "/projects", {"name": "Synthetic PaperQA2 release test"}, status=201)["id"]
+    project = "/projects/" + project_id
+    with tempfile.TemporaryDirectory(prefix="rah-pqa-fixtures-") as directory:
+        fixtures = Path(directory)
+        selected = fixtures / "rah_selected.pdf"
+        excluded = fixtures / "rah_unselected.pdf"
+        make_pdf(selected, "Synthetic journal report. " + INCLUDED + "\nThe sample size is 17 participants.", METADATA)
+        make_pdf(excluded, "Excluded synthetic study. " + EXCLUDED + "\nThe sample size is 999 participants.", METADATA)
+        ids = []
+        for n, fixture in enumerate((selected, excluded)):
+            ids.append(call("POST", project + "/files", status=201, data={
+                "file": (io.BytesIO(fixture.read_bytes()), fixture.name), "revision": str(n), "kind": "pdf",
+            })["artifact_id"])
+        call("POST", project + "/papers", {"revision": 2, "rows": [
+            {"title": "Synthetic paper", "state": "supplied", "pdf_artifact_id": value} for value in ids]})
+        # A pre-existing location near the native app contains the excluded fixture.
+        native_index = root / "apps" / "pqa" / "native" / "synthetic-old-index"
+        native_index.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(excluded, native_index / excluded.name)
+        selection = {"revision": 3, "question": QUESTION, "pdfs": ids[:1]}
+        preview = call("POST", project + "/pqa-preview", selection)
+        checks["hub_preview_matches"] = (preview["files"] == [selected.name] and
+            {row["role"]: (row["model"], row["provider"]) for row in preview["profile"]["destinations"]} ==
+            {role: (model, "Azure") for role, model in MODELS.items()})
+
+        def consent(preview, approve):
+            return {"preview_id": preview["preview_id"], "binding": preview["binding"],
+                    "approve": approve, "account_exports_checked": approve}
+
+        decline = call("POST", project + "/pqa-approve", consent(preview, False))
+        call("POST", project + "/pqa-approve", consent(preview, True), status=409)
+        checks["hub_decline_and_replay"] = not decline["operation_id"]
+        preview = call("POST", project + "/pqa-preview", selection)
+        run = call("POST", project + "/pqa-approve", consent(preview, True))
+        deadline = time.monotonic() + max(timeout, 620)
+        while time.monotonic() < deadline:
+            outcome = call("GET", "/operations/" + run["operation_id"])
+            if outcome["state"] not in ("Queued", "Running"):
+                break
+            time.sleep(0.5)
+        checks["hub_analysis_completed"] = outcome["state"] == "Succeeded"
+        if checks["hub_analysis_completed"]:
+            artifact = outcome["result"]["artifact_id"]
+            native = answer_evidence(call("GET", project + "/artifacts/" + artifact))
+            checks["hub_native_answer_and_references"] = {"PASS": True, "FAIL": False}.get(native["status"], "INCONCLUSIVE")
+            checks["hub_only_selected_and_preserved"] = (
+                [row["id"] for row in outcome["result"]["submitted_files"]] == ids[:1] and
+                file_digest(native_index / excluded.name) == file_digest(excluded) and
+                {row["id"]: row["sha256"] for row in call("GET", project)["artifact"]
+                 if row["id"] in ids} == dict(zip(ids, map(file_digest, (selected, excluded)))))
+
+
+
 def main():
     ap = argparse.ArgumentParser(description="One synthetic live PaperQA2/OpenRouter data-flow report (v2)")
     ap.add_argument("--live", action="store_true", help="Authorize paid synthetic provider requests")
+    ap.add_argument("--require-hub", action="store_true", help="Exercise the installed hub on a disposable data directory")
     ap.add_argument("--report", default="paperqa2_live.json")
     ap.add_argument("--data-dir", type=Path, help="RAH data directory; default is installed RAH location")
     ap.add_argument("--timeout", type=int, default=480, help="Whole child-process deadline (seconds)")
@@ -516,12 +626,17 @@ def main():
     args = ap.parse_args()
     if args._child:
         return child_main(args._input, args._output)
+    if args.require_hub and (args.data_dir is None or args.provider):
+        ap.error("--require-hub needs an explicit disposable --data-dir and uses the frozen Azure route")
     root = (args.data_dir or app_data_root()).expanduser().resolve()
     repo = Path(__file__).resolve().parent.parent
     worker = repo / "rah" / "worker.py"
-    report = {"schema": SCHEMA, "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+    if args.require_hub:
+        from rah import worker as installed_worker
+        worker = Path(installed_worker.__file__).resolve()
+    report = {"schema": SCHEMA, "mode": "installed-hub" if args.require_hub else "diagnostic", "timestamp_utc": datetime.now(timezone.utc).isoformat(),
               "status": "INCONCLUSIVE", "checks": {}, "environment": {
-                  "host_os": platform.system(), "host_arch": platform.machine(),
+                  "host_os": platform.system(), "host_version": platform.release(), "host_arch": platform.machine(),
                   "launcher_python": platform.python_version()},
               "notes": ["Only autogenerated synthetic test PDFs are used; private project files are not read.",
                         "PASS means this sampled live route passed checks, not general proof of future routes.",
@@ -547,21 +662,34 @@ def main():
             matching_rows = [r for r in manifest_rows if r.get("app_id") == "pqa" and
                              r.get("lock_sha256") == record.get("lock_sha256") and
                              r.get("upstream_version") == record.get("upstream_version")]
+            if args.require_hub:
+                from rah.installer import host
+                host_id, arch = host()
+                matching_rows = [row for row in matching_rows if (row["platform"], row["arch"]) == (host_id, arch)]
             report["environment"]["matching_pqa_manifest_rows"] = len(matching_rows)
             report["checks"]["installed_lock_matches_repo_manifest"] = bool(matching_rows)
         else:
             report["checks"]["installed_lock_matches_repo_manifest"] = "INCONCLUSIVE"
-        repo_git = subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
+        repo_git = shutil.which("git") and subprocess.run(["git", "-C", str(repo), "rev-parse", "--short=12", "HEAD"],
                                   capture_output=True, text=True, timeout=5, check=False)
-        if repo_git.returncode == 0:
-            report["environment"]["rah_commit"] = repo_git.stdout.strip()
-        raw = parse_env(root / "hub" / "config" / ".env")
+        if repo_git and repo_git.returncode == 0:
+            report["environment"]["checkout_head"] = repo_git.stdout.strip()
+        raw = {} if args.require_hub else parse_env(root / "hub" / "config" / ".env")
         raw.update({k: v for k, v in os.environ.items() if k in set(ROLE_KEYS.values()) | {
             "RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL", "RAH_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"}})
         key = raw.get("OPENROUTER_API_KEY") or raw.get("RAH_OPENROUTER_API_KEY")
         if not key:
-            raise RuntimeError("No OpenRouter key found in RAH user .env or process environment")
-        models, sources = determine_models(raw)
+            report["checks"]["openrouter_key"] = "INCONCLUSIVE"
+            report["notes"].append("Provide an authorized test key in OPENROUTER_API_KEY.")
+            return 2
+        if args.require_hub:
+            from rah.projects import Projects
+            if Projects(root).list():
+                report["notes"].append("Use a disposable installed RAH data root with no projects.")
+                return 2
+            models, sources = MODELS, dict.fromkeys(MODELS, "hub_settings_api")
+        else:
+            models, sources = determine_models(raw)
         report["environment"]["roles"] = {r: {"model": models[r], "source": sources[r]} for r in MODELS}
         overrides = {}
         for x in args.provider:
@@ -576,7 +704,10 @@ def main():
             write_json(args.report, report)
             print("INCONCLUSIVE: live permission missing; report saved to", args.report)
             return 2
-        providers, reasons = choose_providers(key, models, overrides)
+        if args.require_hub:
+            providers, reasons = dict.fromkeys(MODELS, "Azure"), dict.fromkeys(MODELS, "frozen_candidate")
+        else:
+            providers, reasons = choose_providers(key, models, overrides)
         report["environment"]["providers"] = {role: {"chosen": providers.get(role), "selection": reasons[role]} for role in MODELS}
         missing = set(MODELS) - set(providers)
         if missing:
@@ -587,7 +718,9 @@ def main():
             destinations.append({"role": role, "service": "OpenRouter", "provider": providers[role],
                 "model": models[role], "endpoint": "https://openrouter.ai/api/v1/" +
                 ("embeddings" if role == "embedding" else "chat/completions")})
-        profile = {"id": "openrouter-text-v1", "destinations": destinations}
+        profile = {"id": "openrouter-text-v1", "destinations": destinations,
+                   "policy": "single-provider-no-fallback", "upstream_version": EXPECTED_PQA,
+                   "python": platform.python_version()}
         with tempfile.TemporaryDirectory(prefix="rah-pqa-live-") as tmp:
             home = Path(tmp)
             request = home / "request.json"
@@ -609,7 +742,7 @@ def main():
                                       stdin=subprocess.DEVNULL, check=False)
                 report["checks"]["child_process_exit_zero"] = proc.returncode == 0
             except subprocess.TimeoutExpired:
-                report["checks"]["timeout"] = "FAIL: PaperQA2 live child exceeded requested deadline"
+                report["checks"]["child_finished_before_deadline"] = False
             if result.exists():
                 inner = json.loads(result.read_text(encoding="utf-8"))
                 ids = inner.pop("generation_ids_internal", [])
@@ -623,11 +756,24 @@ def main():
                 check["no_excluded_canary_egress"] = not any(r.get("excluded_marker") for r in requests)
                 check["no_raw_pdf_egress"] = not any(r.get("raw_pdf_header") or r.get("pdf_base64_transfer") for r in requests)
                 check["no_image_payload_egress"] = not any(r.get("image_payload_indicator") for r in requests)
-                negative = [r for r in requests if r.get("phase") == "negative_invalid_provider"]
-                check["invalid_provider_rejected_without_fallback"] = (
-                    inner.get("tests", {}).get("negative_invalid_provider", {}).get("status") == "PASS" and
-                    bool(negative) and all(r.get("provider_only") == ["RAH_NO_SUCH_PROVIDER_DO_NOT_FALLBACK_76239"]
-                    and r.get("allow_fallbacks") is False and r.get("status_code") != 200 for r in negative))
+                invalid = "RAH_NO_SUCH_PROVIDER_DO_NOT_FALLBACK_76239"
+                for role in ("answer", "embedding"):
+                    phase = "negative_" + role
+                    negative = [row for row in requests if row.get("phase") == phase]
+                    check[phase + "_no_fallback"] = (
+                        False if any(row.get("status_code") == 200 for row in negative) else
+                        True if negative and all(row.get("provider_only") == [invalid]
+                            and row.get("allow_fallbacks") is False and row.get("routing_rejection")
+                            for row in negative) else "INCONCLUSIVE")
+                check["no_metadata_canary_egress"] = not any(r.get("metadata_marker") for r in requests)
+                check["request_bodies_observed"] = True if requests and not any(
+                    r.get("streamed_unknown") for r in requests) else "INCONCLUSIVE"
+                native_requests = [row for row in requests if row.get("phase") == "native_pdf_index_and_answer"]
+                allowed = {(d["model"], d["provider"], "/" + d["endpoint"].split("/", 3)[3]) for d in destinations}
+                check["native_requests_match_route"] = bool(native_requests) and all(
+                    (r.get("model"), (r.get("provider_only") or [None])[0], r.get("path")) in allowed
+                    and len(r.get("provider_only") or []) == 1 and r.get("allow_fallbacks") is False
+                    for r in native_requests)
                 check["index_sent_included_text"] = any(r.get("included_marker") for r in requests
                     if r.get("phase") == "native_pdf_index_and_answer")
                 for role in MODELS:
@@ -684,6 +830,16 @@ def main():
                     False if mismatches else True if required_phases <= confirmed_phases
                     else "INCONCLUSIVE")
                 report["checks"].update(check)
+                if args.require_hub:
+                    run_hub(root, key, worker, report, args.timeout)
+                    endpoint_path = "models/" + models["embedding"] + "/endpoints"
+                    try:
+                        endpoint_data = openrouter_get(key, endpoint_path)
+                        entries = endpoint_data.get("data", {}).get("endpoints", [])
+                        listed = any(isinstance(row, dict) and row.get("provider_name", "").lower() == "azure" for row in entries)
+                    except (OSError, ValueError, AttributeError):
+                        listed = False
+                    report["checks"]["embedding_azure_endpoint_listed"] = True if listed else "INCONCLUSIVE"
                 all_checks = report["checks"]
                 report["status"] = ("FAIL" if any(value is False for value in all_checks.values())
                     else "INCONCLUSIVE" if any(value == "INCONCLUSIVE" for value in all_checks.values())
@@ -695,9 +851,9 @@ def main():
             report["notes"].append("One or more roles were not configured in RAH; defaults used for this TEST ONLY. This cannot qualify a different installed assignment.")
         report["notes"].append("Embedding response metadata may not expose actual downstream provider; strict outbound provider pin is checked but downstream embedding delivery remains partly unobservable.")
     except BaseException as exc:
-        report["checks"]["setup"] = {"status": "INCONCLUSIVE", **safe_error(exc, secret=locals().get("key") or "", work=str(root))}
+        report["checks"]["setup"] = {"status": "INCONCLUSIVE", **safe_error(exc)}
         report["notes"].append("Setup did not complete. See the exception type and model/provider selection fields; no secrets are included.")
-        report["status"] = "INCONCLUSIVE"
+        report["status"] = "FAIL" if False in report["checks"].values() else "INCONCLUSIVE"
     finally:
         write_json(args.report, report)
     print(report["status"] + ": saved " + str(Path(args.report).resolve()))
@@ -706,7 +862,7 @@ def main():
         for name, result in sorted(report["checks"].items()):
             if result is False or result == "INCONCLUSIVE":
                 print(" - " + name + ": " + str(result))
-    return 0 if report["status"] == "PASS" else 2
+    return {"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 2}[report["status"]]
 
 
 if __name__ == "__main__":

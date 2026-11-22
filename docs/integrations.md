@@ -19,3 +19,5 @@ The GPT Researcher source archive retains its licence and vendor notices. Review
 LiteLLM’s chat transport flattens the provider field from `extra_body`. Its pinned embedding path forwards the provider field supplied as an embedding keyword. Leaving the embedding setting under `extra_body` sent a nested field. The original resolution of `fhlmi 1.11.0` also failed before sending PaperQA2 tool requests due to the callback signature used with Aviary. The lock pins the newest inspected compatible release, `0.46.2`, without changing the upstream app versions.
 
 The structured import uses the pinned RIS export. Arbitrary JSON files can still be retained and downloaded. The release still needs a live academic survey through the native applications.
+
+The LDR and GPT Researcher locks include small platform-independent wheels built from the exact source archives and SHA-256 values listed under `built_sources` in the installer manifest. The packaged wheelhouses carry those wheels so deployment can remain binary-only. The locks record the bundled wheel hashes and do not change package versions.

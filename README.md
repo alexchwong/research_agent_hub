@@ -2,48 +2,25 @@
 
 RAH is a local dashboard for Local Deep Research, GPT Researcher and PaperQA2. It helps install and open the apps, save original results, track papers, and view shared-key OpenRouter usage.
 
-**Development build.** The wheel includes candidate install routes for Ubuntu x64, Windows 11 x64 and Apple silicon macOS 14 or later. A packaged install and native browser startup are recorded on Debian x64; the target desktop and live-provider acceptance checks remain open. See [handover.md](handover.md) for verification status and native troubleshooting.
+## Install and open
 
-## Bootstrap from a built host bundle
+1. Download the matching ZIP from the official [release page](https://github.com/alexchwong/research_agent_hub/releases) and check its published SHA-256.
+2. Extract it and run **Install.cmd** on Windows x64, **Install.command** on Apple silicon macOS, or **Install.sh** on Ubuntu x64. On Ubuntu, use the file manager's **Run as Program** action or run the script from the extracted folder.
+3. Approve hub setup. It may download its pinned Python. Use the Research Agent Hub desktop shortcut for later sessions.
+4. In the dashboard, select **Install three research apps**, review dependencies and approve.
+5. Open LDR or GPT Researcher. For OpenRouter, enter the shared key once in **Settings**, then save and apply the model settings. Native settings are available for each app.
+6. To analyse papers, choose **Analyse papers**, select a project and supplied PDFs, enter a question and review the recipients before approval. If managed analysis is unavailable, use the standalone command under PaperQA2’s **Advanced / Troubleshooting**.
 
-Build the host bootstrap wheelhouse from this repository with the commands in [DEVEL.md](DEVEL.md), or use the matching GitHub CI artifact. Verify its published hashes and use the pinned uv binary. Replace the example paths with absolute paths. Keep the installed Python interpreter for retained native apps.
+Windows may require unblocking the verified ZIP in its File Properties before extracting it. If Ubuntu extraction drops the executable bit, enable it in the file properties.
 
-On Ubuntu or macOS:
-
-```bash
-uv_bin=/absolute/path/to/uv
-bundle=/absolute/path/to/host-bootstrap
-rah_venv=/absolute/private/path/to/rah-venv
-python_pin="$(cat "$bundle/python-version.txt")"
-"$uv_bin" python install "$python_pin"
-"$uv_bin" venv --managed-python --python "$python_pin" "$rah_venv"
-"$uv_bin" pip sync --python "$rah_venv/bin/python" --require-hashes --only-binary :all: \
-  --no-index --find-links "$bundle/wheelhouse" "$bundle/hub.lock"
-"$rah_venv/bin/rah" setup --uv "$uv_bin"
-```
-
-On Windows PowerShell:
-
-```powershell
-$uvBin = "C:\Path\To\uv.exe"
-$bundle = "C:\Path\To\host-bootstrap"
-$rahVenv = "$env:LOCALAPPDATA\Research Agent Hub\hub\venv"
-$pin = (Get-Content "$bundle\python-version.txt" -Raw).Trim()
-& $uvBin python install $pin
-& $uvBin venv --managed-python --python $pin $rahVenv
-& $uvBin pip sync --python "$rahVenv\Scripts\python.exe" --require-hashes --only-binary :all: `
-  --no-index --find-links "$bundle\wheelhouse" "$bundle\hub.lock"
-& "$rahVenv\Scripts\rah.exe" setup --uv $uvBin
-```
-
-Open **Apps → Install core apps**, review the plan and confirm. An incomplete setup offers **Retry incomplete apps**. Only those apps are retried. The install fetches hash-locked wheels and uses a separate environment for each app. Choose a private data location with sufficient disk space.
+Development ZIPs are candidate builds. See the [release checklist](docs/releases.md) for supported desktop and data-flow evidence. Manual bootstrap is in [DEVEL.md](DEVEL.md).
 
 ## Daily use
 
-- **Apps** opens native LDR and GPT Researcher in the browser once they are ready. Their loopback ports are 58721 and 58722. PaperQA2 shows its standalone terminal command. Add `ask "question"` to run it with your own corpus and native settings.
+- **Apps** opens native LDR and GPT Researcher in the browser once they are ready. Their loopback ports are 58721 and 58722. PaperQA2 offers a browser analysis flow when qualified and shows its standalone command under Advanced. Add `ask "question"` to run it with your own corpus and native settings.
 - **Settings** uses a private `hub/config/.env` under the RAH data directory. Set the OpenRouter key once, then choose separate chat and embedding defaults. An explicit `openrouter:model-id` overrides the relevant default. Enter `native` to release that role to upstream settings. Stop and reopen a browser app to apply saved launch settings. A legacy `RAH_PQA_OPENAI_API_KEY` entry is ignored and preserved in the file. Native provider and search credentials remain separate.
 - **Workflows → Projects** retains original reports, answers and PDFs. Export RIS from native LDR, attach it and review the entries in **Papers Needed**. Paste and manual entry are also available. Obtain each PDF through your own access. Associate the file with its paper and select the files for analysis.
-- **Managed PDF transfer** uses the shared OpenRouter key. After route qualification, the confirmation names OpenRouter and the onward provider for every role. The Zero Data Retention prompt opens OpenRouter Privacy Settings. The user decides whether to enable it. This build keeps the handoff unavailable pending live data-flow and routing evidence. Standalone PaperQA2 is available from Apps.
+- **Managed PDF transfer** uses the shared OpenRouter key. After route qualification, the confirmation names OpenRouter and the onward provider for every role. The Zero Data Retention prompt opens OpenRouter Privacy Settings. The user decides whether to enable it. The handoff is available only for a reviewed installed route. Account ZDR status remains unverified by RAH. Standalone PaperQA2 is available from Apps.
 - **Usage** reports shared-key USD figures and OpenRouter-reported BYOK fields. The total can include activity outside RAH. Direct provider and search-service charges are outside this view.
 
 The four recipes and their human checkpoints are described in [docs/workflows.md](docs/workflows.md).

@@ -25,18 +25,32 @@ def host():
     return HOST.get(sys.platform, sys.platform), {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64"}.get(machine, machine)
 
 
+def host_identity():
+    os_id, arch = host()
+    if sys.platform == "linux":
+        release = platform.freedesktop_os_release()
+        version = release.get("ID", "") + ":" + release.get("VERSION_ID", "")
+    elif sys.platform == "darwin":
+        version = platform.mac_ver()[0]
+    else:
+        version = platform.version()
+    return {"platform": os_id, "arch": arch, "version": version}
+
+
 @dataclass
 class RouteBook:
     document: dict
     directory: Path | None = None
     qualification: bool = False
+    custom: bool = False
 
     @classmethod
     def load(cls, directory=None, qualification=False):
+        custom = directory is not None
         if directory is None:
             directory = Path(str(resources.files("rah").joinpath("install_assets")))
         directory = directory.resolve(strict=True)
-        book = cls(read_json(child(directory, "routes.json")), directory, qualification)
+        book = cls(read_json(child(directory, "routes.json")), directory, qualification, custom)
         if not isinstance(book.document, dict) or book.document.get("schema_version") != 1:
             raise Problem("invalid_manifest", "Expected a version 1 installation manifest.")
         return book
@@ -159,7 +173,7 @@ def install(root, book, app, uv, checkpoint, prepare=None, step=lambda _message:
         try:
             filtered_run(packages + [lock], directory, package_env)
         except Problem as error:
-            raise Problem("dependency_install", "Could not install the locked dependencies. See handover.md.", 503) from error
+            raise Problem("dependency_install", "Could not install the locked dependencies. See docs/releases.md.", 503) from error
         step("Verifying native assets")
         checkpoint()
         for item in route["artifacts"]:
@@ -181,7 +195,7 @@ def install(root, book, app, uv, checkpoint, prepare=None, step=lambda _message:
         try:
             filtered_run(smoke_cmd + ([] if app == "ldr" else ["--help"]), directory, smoke_env, timeout=120)
         except Problem as error:
-            raise Problem("entry_smoke", "Native entry point failed its installed smoke check. See handover.md.", 503) from error
+            raise Problem("entry_smoke", "Native entry point failed its installed smoke check. See docs/releases.md.", 503) from error
         step("Preparing the standalone launcher and settings")
 
         def publish():

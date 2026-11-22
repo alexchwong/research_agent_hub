@@ -120,20 +120,28 @@ async function apps() {
   const rows = await api("/apps");
   if (screen !== "apps") return;
   const grid = element("div");
-  grid.className = "grid";
+  grid.className = "grid app-grid";
   view.replaceChildren(element("h1", "Apps"));
   const incomplete = rows.filter(app => !app.current);
   if (incomplete.length) {
     const setup = section(view, "Core setup");
     const plan = element("div");
-    const label = rows.some(app => app.current) ? "Retry incomplete apps" : "Install core apps";
+    const label = rows.some(app => app.current) ? "Retry incomplete apps" : "Install three research apps";
     setup.append(button(label, async () => {
       const info = await api("/apps/core/install-plan");
       plan.replaceChildren();
       for (const item of info.apps) {
         const detail = section(plan, item.name, item.installed ? "Already installed" :
-          (item.plan?.upstream_version || "No install bundle for this host"));
-        if (item.plan && !item.installed) installDetails(detail, item.plan);
+          (item.plan ? "To be installed" : "No install bundle for this host"));
+        if (item.plan && !item.installed) {
+          const size = item.plan.estimated_bytes;
+          detail.append(element("p", size ? "Downloads locked packages · " + Math.ceil(size / (1024 ** 2)) +
+            " MB estimated" : "Downloads and installs locked packages in the hub data folder."));
+          const details = element("details");
+          details.append(element("summary", "Dependencies and prerequisites"));
+          installDetails(details, item.plan);
+          detail.append(details);
+        }
       }
       plan.append(button("Confirm and install", async () => {
         const run = await api("/apps/core/install", {digest: info.digest});
@@ -156,12 +164,22 @@ async function apps() {
   }
   view.append(grid);
   for (const app of rows) {
-    const card = section(grid, app.name, (app.version || "Pin " + app.candidate) + " · " + app.state);
-    card.append(element("p", app.configuration));
-    if (!app.installable) card.append(element("p", "See handover.md for the current platform status."));
+    const card = section(grid, app.name, app.state === "Exited" ? "Failed" : app.current ? "Ready" : "Needs setup");
+    const advanced = element("details");
+    advanced.append(element("summary", "Advanced / Troubleshooting"),
+      element("p", (app.version || "Pin " + app.candidate) + " · " + app.state));
+    if (app.id === "pqa") {
+      const reason = app.paper_analysis?.reason;
+      const analyse = button("Analyse papers", () => choose("analysis"));
+      analyse.className = "primary";
+      card.append(analyse);
+      if (reason) card.append(element("p", reason));
+    }
+    if (app.configuration) card.append(element("p", app.configuration));
+    if (!app.installable) card.append(element("p", "See the release documentation for platform status."));
     if (app.current) {
       const install = element("div");
-      card.append(button("Review reinstall", async () => {
+      advanced.append(button("Review reinstall", async () => {
         const info = await api("/apps/" + app.id + "/install-plan");
         install.replaceChildren(element("h3", "Installation plan"));
         installDetails(install, info.plan);
@@ -171,7 +189,7 @@ async function apps() {
         }));
       }), install);
       const running = element("div");
-      card.append(button(app.id === "pqa" ? "Show standalone command" : "Open native app", async () => {
+      (app.id === "pqa" ? advanced : card).append(button(app.id === "pqa" ? "Show standalone command" : app.id === "ldr" ? "Open LDR" : "Open GPT Researcher", async () => {
         running.replaceChildren();
         const stop = button("Stop native app", async () => {
           await api("/apps/" + app.id + "/stop", {});
@@ -180,7 +198,7 @@ async function apps() {
         const state = element("p");
         let result = await api("/apps/" + app.id + "/launch", {});
         if (result.command_line) {
-          running.append(element("p", result.note), element("pre", result.command_line));
+          running.append(element("pre", result.command_line), button("Copy standalone command", () => navigator.clipboard.writeText(result.command_line)));
           return;
         }
         running.append(state, stop);
@@ -193,9 +211,12 @@ async function apps() {
         state.textContent = result.state;
         stop.hidden = result.state === "Exited" || result.state === "Stopped";
         if (result.url) {
-          const opened = await api("/apps/" + app.id + "/launch", {open: true});
+          const opened = await api("/apps/" + app.id + "/launch", {ready_generation: result.generation});
           if (opened.url) running.append(external("Open " + app.name, opened.url));
-          if (opened.restart_needed) running.append(element("p", "Stop and reopen this app to apply saved settings."));
+          if (opened.restart_needed) running.append(button("Restart to apply settings", async () => {
+            await api("/apps/" + app.id + "/stop", {});
+            say("Once the app stops, use its Open button to start it with the saved settings.");
+          }));
         }
       }), running);
       if (app.can_stop) card.append(button("Stop running app", async () => {
@@ -203,6 +224,7 @@ async function apps() {
         await apps();
       }));
     }
+    card.append(advanced);
   }
 }
 
@@ -263,15 +285,36 @@ async function settings() {
       "PQA_ANSWER", "PQA_SUMMARY", "PQA_AGENT"] : ["GPTR_EMBEDDING", "PQA_EMBEDDING"];
     for (const role of roles) changes["RAH_" + role].setAttribute("list", roleModels.id);
     managed.append(button("Browse OpenRouter " + family + " models", async () => {
-      const models = await api("/models/" + family);
+      const catalog = await api("/models/" + family + "?details=1");
+      const models = catalog.models;
+      say(catalog.stale ? "Showing saved or release model suggestions. Live data is unavailable." :
+        "Catalogue refreshed " + catalog.refreshed_at +
+        (catalog.benchmark_source ? " · Intelligence shortlist by " + catalog.benchmark_source : ""));
       for (const [list, prefix] of [[defaults, ""], [roleModels, "openrouter:"]]) {
         list.replaceChildren(...models.map(model => {
           const option = element("option");
-          option.value = prefix + model;
+          option.value = prefix + model.id;
+          option.label = [catalog.shortlist.includes(model.id) ? "Shortlisted" : null,
+            model.input === null ? "Price unavailable" : "$" + model.input + " input / 1M tokens",
+            model.output === null ? null : "$" + model.output + " output / 1M tokens",
+            model.context ? model.context + " context" : null, model.tools ? "Tool use" : null]
+            .filter(Boolean).join(" · ");
           return option;
         }));
       }
     }), defaults, roleModels);
+  }
+  managed.append(button("Use managed PaperQA2 models", () => {
+    for (const [key, value] of Object.entries(info.paper_suggestions)) changes[key].value = value;
+    say("Review and save the four PaperQA2 model settings.");
+  }));
+  for (const [app, prefix] of [["LDR", "LDR_"], ["GPT Researcher", "GPTR_"], ["PaperQA2", "PQA_"]]) {
+    managed.append(button("Reset " + app + " to native", () => {
+      for (const key of Object.keys(modelLabels).filter(key => key.startsWith("RAH_" + prefix))) {
+        changes[key].value = "native";
+      }
+      say("Save settings to apply the native model settings for " + app + ".");
+    }));
   }
   for (const [key, exists] of Object.entries(info.credentials)) {
     const parent = credentialLabels[key] ? managed : nativeDetails;
@@ -304,14 +347,14 @@ const recipes = [
   ["Independent report comparison", "Run the public question independently in LDR and GPT Researcher. Attach the original cited reports and choose two to compare. Search and model services may charge for both runs."],
 ];
 
-async function workflows() {
+async function workflows(analysis = false) {
   const projects = await api("/projects");
-  if (screen !== "workflows") return;
-  view.replaceChildren(element("h1", "Workflows"));
+  if (!["workflows", "analysis"].includes(screen)) return;
+  view.replaceChildren(element("h1", analysis ? "Analyse papers" : "Workflows"));
   const grid = element("div");
   grid.className = "grid";
-  view.append(grid);
-  recipes.forEach(([title, steps]) => section(grid, title, steps));
+  if (!analysis) view.append(grid);
+  if (!analysis) recipes.forEach(([title, steps]) => section(grid, title, steps));
   const list = section(view, "Projects");
   for (const project of projects) list.append(button(project.name, () => showProject(project.id)));
   const name = control(list, "New project name");
@@ -351,13 +394,17 @@ async function download(project, item, bib = false) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function showProject(id) {
+async function showProject(id, answerId) {
   const project = await api("/projects/" + id);
-  if (screen !== "workflows") return;
+  if (!["workflows", "analysis"].includes(screen)) return;
   const path = "/projects/" + id;
   const pdfs = project.artifact.filter(item => item.kind === "pdf");
-  view.replaceChildren(button("All projects", workflows), element("h1", project.name),
+  view.replaceChildren(button("All projects", () => workflows(screen === "analysis")), element("h1", project.name),
     button("Open project folder", async () => { await api(path + "/open-folder", {}); }));
+  if (answerId) {
+    const response = await api(path + "/artifacts/" + answerId, undefined, true);
+    section(view, "PaperQA2 answer and native references").append(element("pre", await response.text()));
+  }
   const files = section(view, "Original files");
   for (const item of project.artifact) {
     const row = element("p", item.original_name + " ");
@@ -368,7 +415,8 @@ async function showProject(id) {
       }));
     } else {
       row.append(button("Download", () => download(project, item)));
-      if (item.kind === "answer") {
+      if (item.kind === "answer") row.append(button("View answer and references", () => showProject(id, item.id)));
+      if (item.kind === "answer" && item.has_bib) {
         row.append(button("Download native citations", () => download(project, item, true)));
       }
     }
@@ -446,6 +494,7 @@ async function showProject(id) {
   }
 
   const publicRun = section(view, "GPT Researcher", "Use a public question. It is visible to local process inspection and goes to your configured native research services.");
+  publicRun.hidden = screen === "analysis";
   const publicQuestion = control(publicRun, "Public research question", "textarea");
   const mode = select(publicRun, "Native report mode", [["research_report", "Research report"], ["deep", "Deep Research"]]);
   const publicOK = control(publicRun, "I confirm this question is public", "input", "checkbox");
@@ -456,9 +505,9 @@ async function showProject(id) {
 
   const paperRun = section(view, "Continue in PaperQA2", project.capabilities.paper_route ?
     "Each approved run builds a fresh index from the selected PDFs." :
-    "Managed PDF transfer is unavailable pending OpenRouter data-flow verification. Open native PaperQA2 from Apps to work separately.");
+    project.capabilities.paper_reason || "Managed PDF transfer is unavailable.");
   if (!project.capabilities.paper_route) {
-    paperRun.append(button("Go to Apps", () => choose("apps")));
+    paperRun.append(button("Open Settings", () => choose("settings")), button("Standalone PaperQA2", () => choose("apps")));
     return;
   }
   const selected = new Map();
@@ -466,7 +515,9 @@ async function showProject(id) {
     selected.set(artifact.id, control(paperRun, artifact.original_name, "input", "checkbox"));
   }
   const paperQuestion = control(paperRun, "Question about selected PDFs", "textarea");
-  paperRun.append(button("Continue in PaperQA2", async () => {
+  if (screen === "analysis") paperRun.scrollIntoView();
+  else papers.append(button("Continue in PaperQA2", () => paperRun.scrollIntoView()));
+  paperRun.append(button("Review cloud transfer", async () => {
     const result = await api(path + "/pqa-preview", {revision: project.revision, question: paperQuestion.value,
       pdfs: Array.from(selected).filter(([, item]) => item.checked).map(([key]) => key)});
     const dialog = element("dialog");
@@ -481,18 +532,24 @@ async function showProject(id) {
       destinations.append(element("li", dest.role + " · " + dest.service + " → " + dest.provider +
         " · " + dest.model + " · " + dest.data));
     }
-    const warning = element("p", "Consider enabling Zero Data Retention in OpenRouter before sending private paper text. ");
+    const warning = element("p", "Account Zero Data Retention is unverified by RAH. Consider enabling it before sending paper text. ");
     warning.append(external("Open OpenRouter Privacy Settings", "https://openrouter.ai/settings/privacy"));
     const error = element("p");
     error.setAttribute("role", "alert");
     dialog.append(destinations, warning, error);
+    dialog.append(element("p", "Raw PDFs and page images stay local. The listed services receive text, including citation details that PaperQA2 includes in its prompts."));
+    const exportsChecked = control(dialog, "I confirm that prompt logging and Broadcast or other trace exports exclude this run", "input", "checkbox");
     let busy = false;
     async function approve(choice) {
       if (busy) return;
+      if (choice && !exportsChecked.checked) {
+        error.textContent = "Confirm the account export setting before approval.";
+        return;
+      }
       busy = true;
       let run;
       try {
-        run = await api(path + "/pqa-approve", {preview_id: result.preview_id, binding: result.binding, approve: choice});
+        run = await api(path + "/pqa-approve", {preview_id: result.preview_id, binding: result.binding, approve: choice, account_exports_checked: exportsChecked.checked});
       } catch (problem) {
         if (choice) {
           error.textContent = problem.message;
@@ -503,7 +560,10 @@ async function showProject(id) {
       dialog.close();
       dialog.remove();
       if (run?.operation_id) {
-        await progress(paperRun, run.operation_id, async () => { await showProject(id); say("Original answer saved."); });
+        await progress(paperRun, run.operation_id, async outcome => {
+          await showProject(id, outcome.artifact_id);
+          say("Original answer saved.");
+        });
       }
     }
     dialog.addEventListener("cancel", event => { event.preventDefault(); approve(false); });
@@ -514,7 +574,7 @@ async function showProject(id) {
 
 }
 
-const views = {apps, workflows, usage, settings};
+const views = {apps, workflows, usage, settings, analysis: () => workflows(true)};
 async function choose(name) {
   screen = name;
   document.querySelectorAll("[data-view]").forEach(node => {

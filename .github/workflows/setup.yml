@@ -38,7 +38,8 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
           "$bin/python" scripts/bundle_hub.py --system-python \
             --uv "$uv" \
-            --bundle "$RUNNER_TEMP/rah-bootstrap" --venv "$RUNNER_TEMP/rah-installed"
+            --bundle "$RUNNER_TEMP/rah-bootstrap" --venv "$RUNNER_TEMP/rah-installed" \
+            --release-dir "$RUNNER_TEMP/rah-release-candidates"
       - name: Test installed setup, retained native entry points, and failure isolation
         shell: bash
         run: |
@@ -57,5 +58,5 @@ jobs:
           path: reports/setup.json
       - uses: actions/upload-artifact@v4
         with:
-          name: rah-bootstrap-${{ matrix.runner }}
-          path: ${{ runner.temp }}/rah-bootstrap
+          name: rah-release-candidate-${{ matrix.runner }}
+          path: ${{ runner.temp }}/rah-release-candidates

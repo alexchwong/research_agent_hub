@@ -120,3 +120,77 @@ class OpenRouter:
             if self.sync_key(self.get_key()) == fingerprint:
                 self.catalogue[family] = (models, monotonic())
         return models
+
+
+    def choices(self, family):
+        key = self.get_key()
+        with self.lock:
+            fingerprint = self.sync_key(key)
+            cached = self.catalogue.get(("choices", family))
+            if cached and monotonic() - cached[1] < 900:
+                return cached[0]
+
+        def fetch(path):
+            try:
+                rows = request_json(path, key)
+                return rows if isinstance(rows, list) else None
+            except Problem:
+                return None
+
+        models = fetch("embeddings/models" if family == "embedding" else "models")
+        benchmarks = (fetch("benchmarks?source=artificial-analysis&task_type=intelligence")
+                      if key and family == "chat" and models is not None else None)
+        ranks = {}
+        for row in benchmarks or []:
+            if not isinstance(row, dict) or not isinstance(row.get("model_permaslug"), str):
+                continue
+            score = row.get("intelligence_index")
+            if isinstance(score, (int, Decimal)) and not isinstance(score, bool) and Decimal(score).is_finite():
+                slug = row["model_permaslug"]
+                # Multiple scored variants with the same identifier are ambiguous.
+                ranks[slug] = score if slug not in ranks else None
+        choices = []
+        for row in models or []:
+            if not isinstance(row, dict) or not isinstance(row.get("id"), str):
+                continue
+            arch = row.get("architecture") or {}
+            if family == "chat" and (not isinstance(arch, dict) or "text" not in (arch.get("output_modalities") or [])):
+                continue
+            prices = row.get("pricing")
+            prices = prices if isinstance(prices, dict) else {}
+            def price(field):
+                try:
+                    return amount(Decimal(str(prices.get(field))) * 1_000_000)
+                except InvalidOperation:
+                    return None
+            slug = row.get("canonical_slug")
+            score = ranks.get(slug if isinstance(slug, str) else row["id"])
+            choices.append({"id": row["id"], "input": price("prompt"), "output": price("completion"),
+                            "context": row.get("context_length"), "tools": "tools" in (row.get("supported_parameters") or []),
+                            "score": str(score) if score is not None else None})
+        ranked = sorted((row for row in choices if row["score"] is not None),
+                        key=lambda row: (-Decimal(row["score"]), row["id"]))
+        shortlisted = {row["id"] for row in ranked[:30]}
+
+        def preference(row):
+            price = (Decimal(row["input"]) + Decimal(row["output"] or "0")
+                     if row["input"] is not None and (family == "embedding" or row["output"] is not None)
+                     else Decimal("Infinity"))
+            return (family == "chat" and row["id"] not in shortlisted, price,
+                    -Decimal(row["score"] or "0"), row["id"])
+
+        if models is None and cached:
+            return cached[0] | {"stale": True}
+        if not choices:
+            from .settings import PAPER_MODELS
+            ids = {model for role, model in PAPER_MODELS.items() if (role == "embedding") == (family == "embedding")}
+            choices = [{"id": model, "input": None, "output": None, "context": None, "tools": None, "score": None}
+                       for model in sorted(ids)]
+        result = {"models": sorted(choices, key=preference), "shortlist": sorted(shortlisted),
+                  "benchmark_source": "Artificial Analysis via OpenRouter" if benchmarks is not None else None,
+                  "refreshed_at": datetime.now(timezone.utc).isoformat() if models is not None else None,
+                  "stale": models is None}
+        with self.lock:
+            if self.sync_key(self.get_key()) == fingerprint and models is not None:
+                self.catalogue[("choices", family)] = (result, monotonic())
+        return result

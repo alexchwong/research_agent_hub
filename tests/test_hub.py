@@ -1,4 +1,6 @@
 import io
+from importlib import resources
+import platform
 from pathlib import Path
 import tempfile
 import unittest
@@ -6,8 +8,8 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from rah import settings
-from rah.common import Problem, atomic, prepare_root, private_directory, venv_python, write_json
-from rah.installer import RouteBook
+from rah.common import Problem, atomic, digest, prepare_root, private_directory, venv_python, write_json
+from rah.installer import RouteBook, host_identity
 from rah.jobs import Jobs
 from rah.openrouter import OpenRouter
 from rah.projects import Projects, citations, structured_citations
@@ -90,14 +92,18 @@ class HubTest(unittest.TestCase):
         python = venv_python(app / "versions" / install_id / "venv")
         private_directory(python.parent)
         python.touch()
-        write_json(app / "current.json", {"install_id": install_id, "lock_sha256": "lock"})
+        write_json(app / "current.json", {"install_id": install_id, "lock_sha256": "lock", "upstream_version": "fixture"})
         route = {"lock_sha256": "lock", "upstream_version": "fixture", "paper_evidence": {
             "status": "verified", "profile": "openrouter-text-v1", "lock_sha256": "lock", "reference": "test fixture",
+            "host": host_identity(), "worker_sha256": digest(resources.files("rah").joinpath("worker.py").read_bytes()),
+            "python": platform.python_version(), "upstream_version": "fixture", "policy": "single-provider-no-fallback",
             "routes": {role: {"fixture/embed" if role == "embedding" else "fixture/chat": role + "-host"}
                        for role in PAPER_ROLES},
         }}
         book = Mock()
         book.route.return_value = route
+        book.directory = None
+        book.custom = False
         book.capabilities.return_value = [f"PQA_{role.upper()}:openrouter" for role in PAPER_ROLES]
         projects = Projects(self.root)
         project = projects.create("Transfers")
@@ -107,6 +113,7 @@ class HubTest(unittest.TestCase):
                                           for item in (chosen, excluded)])
         runs = Runs(self.root, book, projects, Jobs())
 
+        settings.install_projection(self.root, "pqa", settings.resolve(settings.load(self.root), "pqa", book.capabilities("pqa")))
         declined = runs.preview(project, 3, [chosen], "Question")
         self.assertFalse((runs.folder(declined["preview_id"]) / "corpus").exists())
         self.assertIsNone(runs.approve(project, declined["preview_id"], declined["binding"], False))
@@ -119,9 +126,10 @@ class HubTest(unittest.TestCase):
         atomic(config_path, (config + "# changed\n").encode())
         with self.assertRaises(Problem) as failure:
             runs.run_paper(pending, Mock())
-        self.assertEqual(failure.exception.code, "stale_preview")
+        self.assertEqual(failure.exception.code, "settings_stale")
         self.assertFalse(pending.directory.exists())
 
+        settings.install_projection(self.root, "pqa", settings.resolve(settings.load(self.root), "pqa", book.capabilities("pqa")))
         preview = runs.preview(project, 3, [chosen], "Question")
         self.assertEqual(preview["files"], ["chosen.pdf"])
         self.assertEqual({item["provider"] for item in preview["profile"]["destinations"]},

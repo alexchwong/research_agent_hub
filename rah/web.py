@@ -80,11 +80,7 @@ def create_app(root, book, uv, identity, token, stop, address):
         stored = settings.applied(root, name)
         if not stored and not config.text:
             stored = settings.install_projection(root, name, settings.resolve(config, name, cap(name)))
-        if not stored or stored.get("revision") != config.revision:
-            raise Problem("settings_stale", "Apply settings before starting this app.", 409)
-        checksum = stored.pop("checksum", None)
-        if checksum != digest(canonical(stored)):
-            raise Problem("settings_stale", "Generated settings were edited. Review and reapply settings.", 409)
+        stored = settings.checked_projection(root, name, config)
         return location, config, upstreams.launch_spec(root, name, location, stored, **options)
 
     @app.before_request
@@ -180,7 +176,7 @@ def create_app(root, book, uv, identity, token, stop, address):
         if service["process"].poll() is not None:
             return {"state": "Exited"}
         if ready:
-            return {"state": "Ready", "url": url, "restart_needed": service["revision"] != config.revision}
+            return {"state": "Ready", "url": url, "generation": service["generation"], "restart_needed": service["revision"] != config.revision}
         if prior or monotonic() - service["started"] >= 120:
             return {"state": "Waiting for the native app to become ready"}
         return {"state": "Starting"}
@@ -212,7 +208,8 @@ def create_app(root, book, uv, identity, token, stop, address):
                              "version": installed[0]["upstream_version"] if installed else None,
                              "candidate": installer.PINS[name], "service": metadata,
                              "can_stop": bool(browser_alive(name)),
-                             "qualification_only": bool(route and route.get("qualification_only"))})
+                             "qualification_only": bool(route and route.get("qualification_only")),
+                             "paper_analysis": runs.availability() if name == "pqa" else None})
         return jsonify(rows)
 
     def core_plan():
@@ -287,7 +284,7 @@ def create_app(root, book, uv, identity, token, stop, address):
                             raise
                         job.report(name, "Failed", str(error))
                     except (OSError, ValueError, TypeError, KeyError):
-                        job.report(name, "Failed", "Could not prepare this app. See handover.md, then retry.")
+                        job.report(name, "Failed", "Could not prepare this app. See docs/releases.md, then retry.")
             job.checkpoint(final=True)
             return {"complete": all(up_to_date(name) for name in APPS)}
 
@@ -300,7 +297,7 @@ def create_app(root, book, uv, identity, token, stop, address):
     def install_plan(name):
         route = book.route(name)
         if not route:
-            raise Problem("route_unavailable", "No install bundle for this host. See handover.md.", 503)
+            raise Problem("route_unavailable", "No install bundle for this host. See docs/releases.md.", 503)
         return jsonify(plan=visible_plan(route), digest=installer.plan_digest(route))
 
     @app.post("/api/apps/<name>/install")
@@ -331,6 +328,15 @@ def create_app(root, book, uv, identity, token, stop, address):
                 else:
                     command_line = shlex.join(command)
                 return jsonify(command=command, command_line=command_line, note="Run this standalone command in a terminal.")
+            if "ready_generation" in data:
+                service = services.get(name)
+                if not service or not browser_alive(name) or data["ready_generation"] != service["generation"]:
+                    raise Problem("native_launch_changed", "The native app changed. Open it again.", 409)
+                state = browser_status(name, config)
+                if state["state"] == "Ready" and not service.get("opened"):
+                    service["opened"] = True
+                    Thread(target=webbrowser.open, args=(state["url"],), daemon=True).start()
+                return jsonify(state)
             if not browser_alive(name):
                 try:
                     with socket.create_connection(("127.0.0.1", browsers[name]), timeout=0.5):
@@ -346,7 +352,8 @@ def create_app(root, book, uv, identity, token, stop, address):
                 except OSError as error:
                     raise Problem("native_launch_failed", "The native app could not start. Review its setup.", 503) from error
                 services[name] = {"process": proc, "revision": config.revision, "started": monotonic(),
-                                  "url": spec.url, "identity": identity_token}
+                                  "url": spec.url, "identity": identity_token, "generation": token_hex(16)}
+            services[name]["opened"] = False
             state = browser_status(name, config)
             if data.get("open") is True and state["state"] == "Ready":
                 Thread(target=webbrowser.open, args=(state["url"],), daemon=True).start()
@@ -406,7 +413,7 @@ def create_app(root, book, uv, identity, token, stop, address):
     def models(family):
         if family not in {"chat", "embedding"}:
             raise Problem("model_family", "Unknown model family.", 404)
-        return jsonify(provider.models(family))
+        return jsonify(provider.choices(family) if request.args.get("details") == "1" else provider.models(family))
 
     @app.get("/api/usage")
     def usage():
@@ -425,12 +432,14 @@ def create_app(root, book, uv, identity, token, stop, address):
     @app.get("/api/projects/<project>")
     def project_get(project):
         data = projects.get(project)
-        paper = book.route("pqa") or {}
-        evidence = paper.get("paper_evidence") or {}
+        for artifact in data["artifact"]:
+            if artifact["kind"] == "answer":
+                path = projects.artifact_path(artifact)
+                artifact["has_bib"] = child(path.parent, path.stem + ".bib").is_file()
+        availability = runs.availability()
         data["capabilities"] = {
             "structured_citations": (book.route("ldr") or {}).get("structured_citations") == "ldr-ris-v1",
-            "paper_route": evidence.get("status") == "verified" and not paper.get("qualification_only")
-                            and evidence.get("lock_sha256") == paper.get("lock_sha256"),
+            "paper_route": availability["available"], "paper_reason": availability.get("reason"),
         }
         return jsonify(data)
 
@@ -517,6 +526,8 @@ def create_app(root, book, uv, identity, token, stop, address):
     def pqa_approve(project):
         data = body()
         key = id_value(data.get("preview_id"))
+        if data.get("approve") is True and data.get("account_exports_checked") is not True:
+            raise Problem("approval", "Confirm that the key excludes this run from additional exports.")
         if type(data.get("approve")) is not bool:
             raise Problem("approval", "Choose Approve or Decline.")
         with lifecycle_lock:

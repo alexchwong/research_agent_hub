@@ -13,6 +13,14 @@ ROLES = {
     "gptr": {"FAST": "FAST_LLM", "SMART": "SMART_LLM", "STRATEGIC": "STRATEGIC_LLM", "EMBEDDING": "EMBEDDING"},
     "pqa": {"ANSWER": "llm", "SUMMARY": "summary_llm", "AGENT": "agent.agent_llm", "EMBEDDING": "embedding"},
 }
+PAPER_MODELS = {
+    "answer": "openai/gpt-4.1-mini",
+    "summary": "openai/gpt-4.1-mini",
+    "agent": "openai/gpt-4.1-mini",
+    "embedding": "openai/text-embedding-3-small",
+}
+PAPER_SUGGESTIONS = {f"RAH_PQA_{role.upper()}": f"openrouter:{model}"
+                     for role, model in PAPER_MODELS.items()}
 COMMON = {"RAH_OPENROUTER_API_KEY", "RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL", "RAH_PQA_SETTINGS_FILE"}
 NATIVE = {
     "ldr": {
@@ -63,6 +71,28 @@ def load(root):
         if stat.st_uid != os.getuid() or stat.st_mode & 0o077:
             raise Problem("permissions", "Set the hub .env file's permissions to 0600.")
     return parse(path.read_text(encoding="utf-8"))
+
+
+def seed(root):
+    path = child(root, "hub", "config", ".env")
+    try:
+        with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w", encoding="utf-8") as handle:
+            for name, value in PAPER_SUGGESTIONS.items():
+                handle.write(f"{name}={value}\n")
+    except FileExistsError:
+        pass
+
+
+def checked_projection(root, app, config):
+    try:
+        stored = applied(root, app)
+        if isinstance(stored, dict):
+            checksum = stored.pop("checksum", None)
+            if stored.get("revision") == config.revision and checksum == digest(canonical(stored)):
+                return stored
+    except (ValueError, OSError):
+        pass
+    raise Problem("settings_stale", "Apply saved settings before continuing.", 409)
 
 
 def resolve(config, app, capabilities):
@@ -188,6 +218,7 @@ def public_config(root, config, capabilities):
             states[app] = {"projection": str(error) if isinstance(error, Problem) else "Apply settings"}
     return {
         "revision": config.revision,
+        "paper_suggestions": PAPER_SUGGESTIONS,
         "values": {key: config.values.get(key, "") for key in sorted(KEYS) if not secret(key)},
         "credentials": {key: bool(config.values.get(key)) for key in sorted(KEYS) if secret(key)},
         "states": states,

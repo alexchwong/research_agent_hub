@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 import io
+import platform
 import shutil
 import subprocess
 import sys
@@ -9,7 +10,7 @@ from threading import Lock
 from time import monotonic
 from uuid import UUID, uuid4
 
-from . import settings, upstreams
+from . import installer, settings
 from .common import Problem, atomic, canonical, child, clean_env, digest, file_digest, private_directory, read_json, venv_python, write_json
 
 
@@ -66,12 +67,28 @@ class Runs:
     def paper_route(self, config):
         route = self.book.route("pqa")
         evidence = (route or {}).get("paper_evidence") or {}
-        if (not route or route.get("qualification_only") or evidence.get("status") != "verified"
+        if (not route or self.book.custom or route.get("qualification_only") or evidence.get("status") != "verified"
                 or evidence.get("lock_sha256") != route["lock_sha256"] or evidence.get("profile") != "openrouter-text-v1"
                 or not evidence.get("reference")):
             raise Problem("unverified_profile", "The managed OpenRouter PDF route still needs data-flow verification. Open native PaperQA2 separately.", 503)
-        location = upstreams.current(self.root, "pqa", self.book)
-        models = settings.resolve(config, "pqa", self.book.capabilities("pqa"))["models"]
+        worker = resources.files("rah").joinpath("worker.py").read_bytes()
+        install = installer.install_location(self.root, "pqa")
+        if (evidence.get("host") != installer.host_identity()
+                or evidence.get("worker_sha256") != digest(worker)
+                or evidence.get("python") != platform.python_version()
+                or evidence.get("upstream_version") != route["upstream_version"]
+                or evidence.get("policy") != "single-provider-no-fallback"
+                or not install or install[0].get("upstream_version") != route["upstream_version"]
+                or install[0].get("lock_sha256") != route["lock_sha256"]
+                or (self.book.directory is not None and
+                    file_digest(child(self.book.directory, route["lock_path"])) != route["lock_sha256"])):
+            raise Problem("unverified_profile", "This installed PaperQA2 runtime has no matching data-flow verification.", 503)
+        location = install[1]
+        projection = settings.resolve(config, "pqa", self.book.capabilities("pqa"))
+        stored = settings.checked_projection(self.root, "pqa", config)
+        if any(stored.get(key) != projection[key] for key in ("models", "env", "args", "native_file")):
+            raise Problem("settings_stale", "Reapply the saved PaperQA2 settings.", 409)
+        models = projection["models"]
         destinations = []
         for role, data in PAPER_ROLES.items():
             model = models.get(role)
@@ -86,7 +103,9 @@ class Runs:
             destinations.append({"role": role, "service": "OpenRouter", "provider": provider,
                                  "model": model["model"], "endpoint": OPENROUTER_BASE + endpoint, "data": data})
         profile = {"id": "openrouter-text-v1", "parser": "Local text-only PDF parsing",
-                   "evidence": evidence["reference"], "destinations": destinations}
+                   "evidence": evidence["reference"], "policy": evidence["policy"],
+                   "identity": digest(canonical(evidence)), "destinations": destinations,
+                   "python": evidence["python"], "upstream_version": evidence["upstream_version"]}
         return route, location, profile
 
     def expire(self):
@@ -94,6 +113,15 @@ class Runs:
             stale = [key for key, preview in self.previews.items() if preview.expires < monotonic()]
             for key in stale:
                 shutil.rmtree(self.previews.pop(key).directory, ignore_errors=True)
+
+    def availability(self):
+        try:
+            self.paper_route(settings.load(self.root))
+        except Problem as error:
+            return {"available": False, "reason": str(error)}
+        except OSError:
+            return {"available": False, "reason": "Repair the PaperQA2 install and try again."}
+        return {"available": True}
 
     def preview(self, project, revision, ids, question):
         config = settings.load(self.root)
@@ -156,7 +184,8 @@ class Runs:
             env = clean_env() | {
                 "OPENROUTER_API_KEY": config.values["RAH_OPENROUTER_API_KEY"], "PQA_HOME": str(home),
                 "HOME": str(home), "USERPROFILE": str(home), "APPDATA": str(home), "LOCALAPPDATA": str(home),
-                "LITELLM_LOCAL_MODEL_COST_MAP": "True",
+                "LITELLM_LOCAL_MODEL_COST_MAP": "True", "PYTHONNOUSERSITE": "1",
+                "PYTHON_DOTENV_DISABLED": "1", "NO_PROXY": "*",
             }
             record = {"app": "pqa", "project": info["project"], "version": route["upstream_version"],
                       "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"]} for row in preview.rows]}
@@ -186,7 +215,12 @@ class Runs:
         write_json(child(folder, "run.json"), record)
         try:
             result = subprocess.run([python, script], cwd=folder, env=env, input=canonical(payload),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=600 if record["app"] == "pqa" else None)
+        except subprocess.TimeoutExpired as error:
+            write_json(child(folder, "collected.json"), {"failed": True})
+            write_json(child(folder, "completion.json"), {"succeeded": False})
+            raise Problem("worker_timeout", "PaperQA2 timed out. Review the selection before retrying.", 503) from error
         except OSError as error:
             write_json(child(folder, "collected.json"), {"failed": True})
             write_json(child(folder, "completion.json"), {"succeeded": False})

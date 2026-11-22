@@ -1,6 +1,9 @@
 """Small worker for native calls. This file also runs inside the PaperQA2 venv."""
+from contextlib import contextmanager
+from importlib.metadata import version
 import json
 import os
+import platform
 from pathlib import Path
 import subprocess
 import sys
@@ -51,7 +54,54 @@ def paper_options(profile):
     }
 
 
+@contextmanager
+def paper_transport(profile):
+    import httpx
+
+    allowed = {(item["endpoint"], item["model"], item["provider"])
+               for item in profile["destinations"]}
+    send = httpx.Client.send
+    send_async = httpx.AsyncClient.send
+
+    def check(request):
+        body = json.loads(request.content)
+        provider = body.get("provider")
+        if (request.method != "POST" or not isinstance(provider, dict)
+                or provider.get("allow_fallbacks") is not False
+                or not isinstance(provider.get("only"), list)
+                or len(provider["only"]) != 1
+                or (str(request.url), body.get("model"), provider["only"][0]) not in allowed
+                or body.get("models")):
+            raise ValueError("PaperQA2 attempted an unapproved request")
+
+    def reject_redirect(response):
+        if response.has_redirect_location:
+            raise ValueError("PaperQA2 attempted a redirect")
+        return response
+
+    def guarded(client, request, **kwargs):
+        check(request)
+        return reject_redirect(send(client, request, **(kwargs | {"follow_redirects": False})))
+
+    async def guarded_async(client, request, **kwargs):
+        check(request)
+        return reject_redirect(await send_async(client, request, **(kwargs | {"follow_redirects": False})))
+
+    httpx.Client.send, httpx.AsyncClient.send = guarded, guarded_async
+    try:
+        yield
+    finally:
+        httpx.Client.send, httpx.AsyncClient.send = send, send_async
+
+
 def paper(request, cwd):
+    profile = request["profile"]
+    if profile.get("policy") == "single-provider-no-fallback":
+        pins = {"paper-qa": profile["upstream_version"], "fhlmi": "0.46.2",
+                "fhaviary": "0.37.0", "litellm": "1.84.1",
+                "paper-qa-pypdf": profile["upstream_version"], "pypdf": "7.1.1"}
+        if profile["python"] != platform.python_version() or any(version(name) != pin for name, pin in pins.items()):
+            raise ValueError("PaperQA2 runtime differs from the verified profile")
     from paperqa import Settings, ask
     from paperqa.settings import MultimodalOptions
     from paperqa_pypdf import parse_pdf_to_pages
@@ -62,7 +112,8 @@ def paper(request, cwd):
     settings = Settings(**options,
                         parsing={"multimodal": MultimodalOptions.OFF, "use_doc_details": False,
                                  "parse_pdf": parse_pdf_to_pages})
-    result = ask(request["question"], settings)
+    with paper_transport(request["profile"]):
+        result = ask(request["question"], settings)
     if str(result.status) != "success" or not result.session.formatted_answer:
         raise ValueError("PaperQA2 did not return an answer")
     bib = result.bibtex or {}

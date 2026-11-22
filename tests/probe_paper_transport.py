@@ -34,7 +34,8 @@ def probe(worker, runner):
         model = "openai/text-embedding-3-small" if embedding else "openai/gpt-4.1-mini"
         destinations.append({"role": role, "service": "OpenRouter", "provider": provider, "model": model, "endpoint": endpoint})
         expected[provider] = (endpoint, model)
-    settings = Settings(**module.paper_options({"id": "openrouter-text-v1", "destinations": destinations}))
+    profile = {"id": "openrouter-text-v1", "destinations": destinations}
+    settings = Settings(**module.paper_options(profile))
     observed = set()
 
     def intercept(request):
@@ -88,7 +89,8 @@ def probe(worker, runner):
         assert await settings.get_embedding_model().embed_documents(["synthetic PDF excerpt"]) == [[.3, .4]]
 
     with patch.object(httpx.AsyncClient, "send", send_async), patch.object(httpx.Client, "send", send_sync):
-        runner.run(exercise())
+        with module.paper_transport(profile):
+            runner.run(exercise())
     assert observed == expected.keys(), observed
     print("PaperQA2 serialized OpenRouter provider restrictions for answer, summary, agent tools and embeddings.")
 
