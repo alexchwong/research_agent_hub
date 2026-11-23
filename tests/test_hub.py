@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from rah import settings
 from rah.common import Problem, atomic, digest, prepare_root, private_directory, venv_python, write_json
-from rah.installer import RouteBook, host_identity
+from rah.installer import RouteBook
 from rah.jobs import Jobs
 from rah.openrouter import OpenRouter
 from rah.projects import Projects, citations, structured_citations
@@ -41,10 +41,10 @@ class HubTest(unittest.TestCase):
         pdf = store.register(first, io.BytesIO(b"%PDF-1.7\nfirst"), "sample.pdf", "pdf", 0)
         with self.assertRaises(Problem):
             store.save_papers(second, 0, [{"title": "paper", "state": "supplied", "pdf_artifact_id": pdf}])
-        store.save_papers(first, 1, [{"title": "paper", "state": "supplied", "pdf_artifact_id": pdf}])
-        self.assertEqual(store.selected_pdfs(first, [pdf], 2)[0]["id"], pdf)
+        store.save_papers(first, 0, [{"title": "paper", "state": "supplied", "pdf_artifact_id": pdf}])
+        self.assertEqual(store.selected_pdfs(first, [pdf])[0]["id"], pdf)
         with self.assertRaises(Problem):
-            store.selected_pdfs(first, [pdf], 0)
+            store.save_papers(first, 0, [{"title": "stale edit"}])
         self.assertEqual(citations("1. A DOI 10.1000/test\n   PMID: 1234\n2. B")[0]["pmid"], "1234")
 
     def test_protected_requests_and_unverified_pdf(self):
@@ -92,48 +92,56 @@ class HubTest(unittest.TestCase):
         python = venv_python(app / "versions" / install_id / "venv")
         private_directory(python.parent)
         python.touch()
-        write_json(app / "current.json", {"install_id": install_id, "lock_sha256": "lock", "upstream_version": "fixture"})
-        route = {"lock_sha256": "lock", "upstream_version": "fixture", "paper_evidence": {
-            "status": "verified", "profile": "openrouter-text-v1", "lock_sha256": "lock", "reference": "test fixture",
-            "host": host_identity(), "worker_sha256": digest(resources.files("rah").joinpath("worker.py").read_bytes()),
-            "python": platform.python_version(), "upstream_version": "fixture", "policy": "single-provider-no-fallback",
-            "routes": {role: {"fixture/embed" if role == "embedding" else "fixture/chat": role + "-host"}
-                       for role in PAPER_ROLES},
-        }}
+        lock = self.root / "fixture.lock"
+        atomic(lock, b"fixture lock")
+        lock_hash = digest(lock.read_bytes())
+        write_json(app / "current.json", {"install_id": install_id, "lock_sha256": lock_hash, "upstream_version": "fixture"})
+        route = {"lock_sha256": lock_hash, "lock_path": lock.name, "upstream_version": "fixture",
+                 "python_build": platform.python_version(), "paper_profile": settings.PAPER_PROFILE}
+        evidence = {"status": "verified", "lock_sha256": [lock_hash], "reference": "test fixture",
+                    "worker_sha256": digest(resources.files("rah").joinpath("worker.py").read_bytes()),
+                    "python": platform.python_version(), "upstream_version": "fixture",
+                    "policy": "single-provider-no-fallback",
+                    "roles": {role: {"provider": "Azure",
+                                     "model": "fixture/embed" if role == "embedding" else "fixture/chat",
+                                     "endpoint": "https://openrouter.ai/api/v1/" +
+                                                 ("embeddings" if role == "embedding" else "chat/completions")}
+                              for role in PAPER_ROLES}}
         book = Mock()
         book.route.return_value = route
-        book.directory = None
+        book.document = {"paper_profiles": {settings.PAPER_PROFILE: evidence}}
+        book.directory = self.root
         book.custom = False
         book.capabilities.return_value = [f"PQA_{role.upper()}:openrouter" for role in PAPER_ROLES]
         projects = Projects(self.root)
         project = projects.create("Transfers")
         chosen = projects.register(project, io.BytesIO(b"%PDF-1.7\nselected"), "chosen.pdf", "pdf", 0)
-        excluded = projects.register(project, io.BytesIO(b"%PDF-1.7\nexcluded"), "excluded.pdf", "pdf", 1)
-        projects.save_papers(project, 2, [{"title": item, "state": "supplied", "pdf_artifact_id": item}
+        excluded = projects.register(project, io.BytesIO(b"%PDF-1.7\nexcluded"), "excluded.pdf", "pdf")
+        projects.save_papers(project, 0, [{"title": item, "state": "supplied", "pdf_artifact_id": item}
                                           for item in (chosen, excluded)])
         runs = Runs(self.root, book, projects, Jobs())
 
         settings.install_projection(self.root, "pqa", settings.resolve(settings.load(self.root), "pqa", book.capabilities("pqa")))
-        declined = runs.preview(project, 3, [chosen], "Question")
+        declined = runs.preview(project, [chosen], "Question")
         self.assertFalse((runs.folder(declined["preview_id"]) / "corpus").exists())
         self.assertIsNone(runs.approve(project, declined["preview_id"], declined["binding"], False))
         self.assertFalse(runs.folder(declined["preview_id"]).exists())
         with self.assertRaises(Problem):
             runs.approve(project, declined["preview_id"], declined["binding"], True)
 
-        stale = runs.preview(project, 3, [chosen], "Question")
+        stale = runs.preview(project, [chosen], "Question")
         pending = runs.previews[stale["preview_id"]]
-        atomic(config_path, (config + "# changed\n").encode())
+        atomic(config_path, config.replace("KEY=synthetic", "KEY=replaced").encode())
         with self.assertRaises(Problem) as failure:
             runs.run_paper(pending, Mock())
         self.assertEqual(failure.exception.code, "settings_stale")
         self.assertFalse(pending.directory.exists())
 
-        settings.install_projection(self.root, "pqa", settings.resolve(settings.load(self.root), "pqa", book.capabilities("pqa")))
-        preview = runs.preview(project, 3, [chosen], "Question")
+        atomic(config_path, (config + "# unrelated edit\n").encode())
+        preview = runs.preview(project, [chosen], "Question")
         self.assertEqual(preview["files"], ["chosen.pdf"])
         self.assertEqual({item["provider"] for item in preview["profile"]["destinations"]},
-                         {role + "-host" for role in PAPER_ROLES})
+                         {"Azure"})
 
         def verify(folder, interpreter, env, payload, record):
             self.assertEqual(interpreter, python)

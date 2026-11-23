@@ -542,22 +542,12 @@ def run_hub(root, key, worker, report, timeout):
         raise RuntimeError("No standard installed host route")
     if Projects(root).list():
         raise RuntimeError("Use a disposable RAH data directory with no projects")
-    evidence = {
-        "status": "verified", "profile": "openrouter-text-v1", "reference": "synthetic live test only",
-        "host": installer.host_identity(), "worker_sha256": file_digest(worker),
-        "lock_sha256": route["lock_sha256"], "python": platform.python_version(),
-        "upstream_version": route["upstream_version"], "policy": "single-provider-no-fallback",
-        "routes": {role: {model: "Azure"} for role, model in MODELS.items()},
-    }
-    packaged_evidence = route.get("paper_evidence")
-    if packaged_evidence and packaged_evidence.get("status") == "verified":
-        comparable = {name: value for name, value in evidence.items() if name != "reference"}
-        if any(packaged_evidence.get(name) != value for name, value in comparable.items()):
-            raise RuntimeError("The packaged route differs from the live candidate")
-    else:
-        route["paper_evidence"] = evidence
-    report["candidate_evidence"] = evidence | {"status": "candidate", "reference": "replace after review"}
-    report["environment"]["packaged_gate_enabled"] = bool(packaged_evidence and packaged_evidence.get("status") == "verified")
+    evidence = route_book.document.get("paper_profiles", {}).get(route.get("paper_profile"), {})
+    if (evidence.get("status") != "verified" or evidence.get("worker_sha256") != file_digest(worker)
+            or route["lock_sha256"] not in evidence["lock_sha256"]
+            or {role: item["model"] for role, item in evidence["roles"].items()} != MODELS):
+        raise RuntimeError("The installed hub lacks the matching reviewed PaperQA2 profile")
+    report["environment"]["packaged_gate_enabled"] = True
     origin = "http://127.0.0.1:8500"
     headers = {"Authorization": "Bearer synthetic-test", "Origin": origin}
     client = create_app(root, route_book, None, "live-diagnostic", "synthetic-test",
@@ -568,7 +558,9 @@ def run_hub(root, key, worker, report, timeout):
                                headers=headers, json=payload, **kwargs)
         if response.status_code != status:
             code = (response.get_json(silent=True) or {}).get("code", "unknown")
-            report["hub_api_error"] = {"method": method, "status": response.status_code, "code": code}
+            message = (response.get_json(silent=True) or {}).get("message", "")
+            report["hub_api_error"] = {"method": method, "status": response.status_code, "code": code,
+                                       "message": message}
             raise RuntimeError("Hub verification API request failed")
         return response.get_json() if response.is_json else response.get_data(as_text=True)
 
@@ -595,13 +587,13 @@ def run_hub(root, key, worker, report, timeout):
             ids.append(call("POST", project + "/files", status=201, data={
                 "file": (io.BytesIO(fixture.read_bytes()), fixture.name), "revision": str(n), "kind": "pdf",
             })["artifact_id"])
-        call("POST", project + "/papers", {"revision": 2, "rows": [
+        call("POST", project + "/papers", {"revision": 0, "rows": [
             {"title": "Synthetic paper", "state": "supplied", "pdf_artifact_id": value} for value in ids]})
         # A pre-existing location near the native app contains the excluded fixture.
         native_index = root / "apps" / "pqa" / "native" / "synthetic-old-index"
         native_index.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(excluded, native_index / excluded.name)
-        selection = {"revision": 3, "question": QUESTION, "pdfs": ids[:1]}
+        selection = {"question": QUESTION, "pdfs": ids[:1]}
         preview = call("POST", project + "/pqa-preview", selection)
         checks["hub_preview_matches"] = (preview["files"] == [selected.name] and
             {row["role"]: (row["model"], row["provider"]) for row in preview["profile"]["destinations"]} ==

@@ -63,8 +63,13 @@ def release_zip(uv, target, output):
         shutil.copy2(scripts / "Install.sh", target / entry).chmod(0o755)
         shutil.copy2(uv, target / "uv").chmod(0o755)
     (target / "host.txt").write_text(host + "\n", encoding="utf-8")
+    instructions = {
+        "Install.sh": "Extract the ZIP and run sh Install.sh in a terminal from the extracted folder.",
+        "Install.command": "Extract the ZIP and open Install.command on macOS 14 or later. If macOS blocks it, use the documented Gatekeeper steps.",
+        "Install.cmd": "Unblock the downloaded ZIP before extraction, then open Install.cmd.",
+    }
     (target / "START.txt").write_text(
-        f"Extract the ZIP and run {entry}. Then approve the three core apps in the dashboard.\n"
+        instructions[entry] + "\nConfirm once to install the hub and all three core apps.\n"
         "See the official release page for the ZIP checksum and accepted operating systems.\n",
         encoding="utf-8")
     files = sorted(path for path in target.rglob("*") if path.is_file() and path.name != "sha256.txt")

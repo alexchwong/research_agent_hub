@@ -4,24 +4,21 @@ RAH is a local dashboard for Local Deep Research, GPT Researcher and PaperQA2. I
 
 ## Install and open
 
-1. Download the matching ZIP from the official [release page](https://github.com/alexchwong/research_agent_hub/releases) and check its published SHA-256.
-2. Extract it and run **Install.cmd** on Windows x64, **Install.command** on Apple silicon macOS, or **Install.sh** on Ubuntu x64. On Ubuntu, use the file manager's **Run as Program** action or run the script from the extracted folder.
-3. Approve hub setup. It may download its pinned Python. Use the Research Agent Hub desktop shortcut for later sessions.
-4. In the dashboard, select **Install three research apps**, review dependencies and approve.
-5. Open LDR or GPT Researcher. For OpenRouter, enter the shared key once in **Settings**, then save and apply the model settings. Native settings are available for each app.
-6. To analyse papers, choose **Analyse papers**, select a project and supplied PDFs, enter a question and review the recipients before approval. If managed analysis is unavailable, use the standalone command under PaperQA2’s **Advanced / Troubleshooting**.
+1. Download the matching ZIP and verify its published SHA-256. [Release page](https://github.com/alexchwong/research_agent_hub/releases)
+2. Extract the ZIP. On Ubuntu x64, open a terminal in the extracted folder and run `sh Install.sh`. On Windows x64, open **Install.cmd**. On Apple silicon macOS 14 or later, open **Install.command** if permitted by your Mac’s security settings.
+3. Confirm once to install RAH, Local Deep Research, GPT Researcher and PaperQA2. Setup shows progress in the terminal and opens the workspace. The core apps require disk space for three independent environments and access to download locked packages. For later sessions use the desktop shortcut or `rah open`. If an app failed to install, use its **Retry** action in **App details**.
 
-Windows may require unblocking the verified ZIP in its File Properties before extracting it. If Ubuntu extraction drops the executable bit, enable it in the file properties.
+On Windows, use File Properties to unblock the verified ZIP before extraction if Windows marks it as downloaded. The installer uses PowerShell’s RemoteSigned policy. On macOS, after verifying the ZIP, follow your normal Gatekeeper approval process if macOS blocks the application.
 
-Development ZIPs are candidate builds. See the [release checklist](docs/releases.md) for supported desktop and data-flow evidence. Manual bootstrap is in [DEVEL.md](DEVEL.md).
+Development ZIPs are candidates. See [release evidence](docs/releases.md) for verified platforms and [DEVEL.md](DEVEL.md) for a manual bootstrap.
 
 ## Daily use
 
-- **Apps** opens native LDR and GPT Researcher in the browser once they are ready. Their loopback ports are 58721 and 58722. PaperQA2 offers a browser analysis flow when qualified and shows its standalone command under Advanced. Add `ask "question"` to run it with your own corpus and native settings.
-- **Settings** uses a private `hub/config/.env` under the RAH data directory. Set the OpenRouter key once, then choose separate chat and embedding defaults. An explicit `openrouter:model-id` overrides the relevant default. Enter `native` to release that role to upstream settings. Stop and reopen a browser app to apply saved launch settings. A legacy `RAH_PQA_OPENAI_API_KEY` entry is ignored and preserved in the file. Native provider and search credentials remain separate.
-- **Workflows → Projects** retains original reports, answers and PDFs. Export RIS from native LDR, attach it and review the entries in **Papers Needed**. Paste and manual entry are also available. Obtain each PDF through your own access. Associate the file with its paper and select the files for analysis.
-- **Managed PDF transfer** uses the shared OpenRouter key. After route qualification, the confirmation names OpenRouter and the onward provider for every role. The Zero Data Retention prompt opens OpenRouter Privacy Settings. The user decides whether to enable it. The handoff is available only for a reviewed installed route. Account ZDR status remains unverified by RAH. Standalone PaperQA2 is available from Apps.
-- **Usage** reports shared-key USD figures and OpenRouter-reported BYOK fields. The total can include activity outside RAH. Direct provider and search-service charges are outside this view.
+- **New chat** opens a blank composer. Choose an app and submit a request to start the chat. Projects group chats and files. New requests outside a named project go to **Unfiled**.
+- **Local Deep Research** opens its native web interface. Enter the task there, then attach its exported report or RIS to the originating chat. **Papers Needed** previews RIS, accepts pasted and manual citations, and tracks which PDFs you have supplied.
+- **GPT Researcher** accepts a public question and report mode. The managed action discloses its model and search services. Native modes remain available from **Open native app** and **App details**.
+- **PaperQA2** accepts PDFs directly or from a project. Add a question and any explicit excerpt you want to use. Review the selected files and the OpenRouter → Azure route, then approve once. Reopen the chat to read the native answer and download its references. Account ZDR is optional and managed through OpenRouter. **Show standalone command** is available for native settings and modes.
+- **Settings** stores scoped settings in the private `hub/config/.env`. Add your OpenRouter key and save. Apply the recommended PaperQA2 models if needed. **Advanced** exposes shared model defaults, app overrides and separate provider/search credentials. **Usage** reports current-key OpenRouter costs and coverage, including activity outside RAH.
 
 The four recipes and their human checkpoints are described in [docs/workflows.md](docs/workflows.md).
 

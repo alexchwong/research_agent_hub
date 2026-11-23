@@ -51,16 +51,18 @@ class Jobs:
         self.records = {}
         self.closing = False
 
-    def start(self, resource, task):
+    def start(self, resource, task, *, reserve=None, finished=None):
         with self.lock:
             if self.closing or self.busy(resource):
                 raise Problem("busy", "An operation is already active.", 409)
             job = Job(str(uuid4()), resource)
+            if reserve:
+                reserve(job)
             self.records[job.id] = job
-            self.executor.submit(self.run, job, task)
+            self.executor.submit(self.run, job, task, finished)
             return job.id
 
-    def run(self, job, task):
+    def run(self, job, task, finished=None):
         with job.lock:
             job.state = "Running"
         try:
@@ -78,6 +80,9 @@ class Jobs:
             with job.lock:
                 job.result = result
                 job.state = "Succeeded"
+        finally:
+            if finished:
+                finished(job)
 
     def busy(self, resource=None):
         with self.lock:

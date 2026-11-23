@@ -41,6 +41,7 @@ class Runs:
         self.previews = {}
         self.lock = Lock()
         self.recover()
+        self.projects.interrupt()
 
     def folder(self, run_id):
         return child(self.root, "hub", "runs", run_id)
@@ -61,48 +62,39 @@ class Runs:
                     if marker["succeeded"]:
                         self.collect(folder, record)
                     shutil.rmtree(folder)
-            except (Problem, OSError, ValueError, KeyError):
+            except (Problem, OSError, ValueError, KeyError, TypeError):
                 continue
 
     def paper_route(self, config):
         route = self.book.route("pqa")
-        evidence = (route or {}).get("paper_evidence") or {}
-        if (not route or self.book.custom or route.get("qualification_only") or evidence.get("status") != "verified"
-                or evidence.get("lock_sha256") != route["lock_sha256"] or evidence.get("profile") != "openrouter-text-v1"
-                or not evidence.get("reference")):
-            raise Problem("unverified_profile", "The managed OpenRouter PDF route still needs data-flow verification. Open native PaperQA2 separately.", 503)
+        key = (route or {}).get("paper_profile")
+        evidence = self.book.document.get("paper_profiles", {}).get(key, {})
+        if (not route or self.book.custom or route.get("qualification_only")
+                or key != settings.PAPER_PROFILE or evidence.get("status") != "verified"
+                or route["lock_sha256"] not in evidence["lock_sha256"]):
+            raise Problem("unverified_profile", "The installed package has no reviewed PaperQA2 route. Use the standalone app.", 503)
         worker = resources.files("rah").joinpath("worker.py").read_bytes()
         install = installer.install_location(self.root, "pqa")
-        if (evidence.get("host") != installer.host_identity()
-                or evidence.get("worker_sha256") != digest(worker)
-                or evidence.get("python") != platform.python_version()
-                or evidence.get("upstream_version") != route["upstream_version"]
-                or evidence.get("policy") != "single-provider-no-fallback"
+        if (evidence["worker_sha256"] != digest(worker)
+                or evidence["python"] != route["python_build"] or evidence["python"] != platform.python_version()
+                or evidence["upstream_version"] != route["upstream_version"]
+                or evidence["policy"] != "single-provider-no-fallback"
                 or not install or install[0].get("upstream_version") != route["upstream_version"]
                 or install[0].get("lock_sha256") != route["lock_sha256"]
-                or (self.book.directory is not None and
-                    file_digest(child(self.book.directory, route["lock_path"])) != route["lock_sha256"])):
-            raise Problem("unverified_profile", "This installed PaperQA2 runtime has no matching data-flow verification.", 503)
+                or file_digest(child(self.book.directory, route["lock_path"])) != route["lock_sha256"]):
+            raise Problem("unverified_profile", "Repair PaperQA2 at the reviewed pin or use the standalone app.", 503)
         location = install[1]
         projection = settings.resolve(config, "pqa", self.book.capabilities("pqa"))
-        stored = settings.checked_projection(self.root, "pqa", config)
-        if any(stored.get(key) != projection[key] for key in ("models", "env", "args", "native_file")):
-            raise Problem("settings_stale", "Reapply the saved PaperQA2 settings.", 409)
-        models = projection["models"]
+        stored = settings.checked_projection(self.root, "pqa", config, effective=projection)
         destinations = []
         for role, data in PAPER_ROLES.items():
-            model = models.get(role)
-            if not model or model["provider"] != "openrouter":
-                raise Problem("unverified_role", f"Select a verified OpenRouter model for PaperQA2 {role}.", 409)
-            providers = evidence.get("routes", {}).get(role, {})
-            provider = providers.get(model["model"])
-            if (not isinstance(provider, str) or not provider
-                    or any(c.isspace() for c in provider)):
-                raise Problem("unverified_role", f"PaperQA2 {role} has no verified provider for the selected model.", 409)
-            endpoint = "embeddings" if role == "embedding" else "chat/completions"
-            destinations.append({"role": role, "service": "OpenRouter", "provider": provider,
-                                 "model": model["model"], "endpoint": OPENROUTER_BASE + endpoint, "data": data})
-        profile = {"id": "openrouter-text-v1", "parser": "Local text-only PDF parsing",
+            recipient = evidence["roles"][role]
+            if (stored["models"].get(role) != {"provider": "openrouter", "model": recipient["model"]}
+                    or recipient["provider"] != "Azure"
+                    or recipient["endpoint"] != OPENROUTER_BASE + ("embeddings" if role == "embedding" else "chat/completions")):
+                raise Problem("unverified_role", f"Use recommended PaperQA2 settings for {role}, or open the standalone app.", 409)
+            destinations.append(recipient | {"role": role, "service": "OpenRouter", "data": data})
+        profile = {"id": key, "parser": "Local text-only PDF parsing",
                    "evidence": evidence["reference"], "policy": evidence["policy"],
                    "identity": digest(canonical(evidence)), "destinations": destinations,
                    "python": evidence["python"], "upstream_version": evidence["upstream_version"]}
@@ -118,33 +110,56 @@ class Runs:
         try:
             self.paper_route(settings.load(self.root))
         except Problem as error:
-            return {"available": False, "reason": str(error)}
+            return {"available": False, "reason": str(error), "code": error.code}
         except OSError:
             return {"available": False, "reason": "Repair the PaperQA2 install and try again."}
         return {"available": True}
 
-    def preview(self, project, revision, ids, question):
+    def reviewing(self, preview_id):
+        self.expire()
+        with self.lock:
+            return preview_id in self.previews
+
+    def preview(self, project, ids, question, *, entry=None, quote=""):
         config = settings.load(self.root)
         route, location, profile = self.paper_route(config)
-        rows = self.projects.selected_pdfs(project, ids, revision)
+        rows = self.projects.selected_pdfs(project, ids)
         preview_id = str(uuid4())
         folder = private_directory(self.folder(preview_id))
         try:
             for row in rows:
                 if file_digest(self.projects.artifact_path(row)) != row["sha256"]:
                     raise Problem("changed_pdf", "A PDF changed. Attach the current version before continuing.", 409)
-            binding = {"project": project, "project_revision": revision, "settings_revision": config.revision,
-                       "question": question, "install": location.name, "lock": route["lock_sha256"],
-                       "files": [[row["id"], row["sha256"]] for row in rows], "profile": profile}
+            binding = {"project": project, "entry": entry, "credential": digest(config.values["RAH_OPENROUTER_API_KEY"].encode()),
+                       "question": question, "quote": quote, "install": location.name, "lock": route["lock_sha256"],
+                       "files": [[row["id"], row["original_name"], row["sha256"]] for row in rows], "profile": profile}
             preview = Preview(folder, binding, rows, monotonic() + 900, digest(canonical(binding)))
             self.expire()
             with self.lock:
+                if entry:
+                    row = self.projects.entry(project, entry)
+                    self.projects.transition(project, entry, ("Preparing", "Awaiting approval"), "Awaiting approval",
+                                             input_ids=ids, preview_id=preview_id, reason=None)
+                    if prior := self.previews.pop(row["preview_id"], None):
+                        shutil.rmtree(prior.directory, ignore_errors=True)
                 self.previews[preview_id] = preview
         except BaseException:
             shutil.rmtree(folder, ignore_errors=True)
             raise
         return {"preview_id": preview_id, "binding": preview.digest, "profile": profile, "question": question,
-                "files": [row["original_name"] for row in rows], "reindex": len(rows)}
+                "quote": quote, "files": [row["original_name"] for row in rows], "reindex": len(rows)}
+
+    def observe_request(self, project, entry, *, run_id=None, allowed=("Preparing",)):
+        if not entry:
+            return {}
+        def reserve(job):
+            self.projects.transition(project, entry, allowed, "Running", operation_id=job.id,
+                                     run_id=run_id or job.id, reason=None)
+        def finished(job):
+            if job.state != "Succeeded":
+                state = "Cancelled" if job.state == "Cancelled" else "Failed"
+                self.projects.transition(project, entry, ("Running",), state, reason=job.reason)
+        return {"reserve": reserve, "finished": finished}
 
     def approve(self, project, preview_id, binding, approve):
         self.expire()
@@ -152,15 +167,25 @@ class Runs:
             preview = self.previews.get(preview_id)
             if not preview or project != preview.binding["project"] or binding != preview.digest:
                 raise Problem("stale_preview", "The preview expired or changed. Review it again.", 409)
+            entry = preview.binding["entry"]
+            if entry and self.projects.entry(project, entry)["preview_id"] != preview_id:
+                raise Problem("stale_preview", "The preview changed. Review it again.", 409)
+            if approve:
+                callbacks = self.observe_request(project, entry, run_id=preview_id, allowed=("Awaiting approval",))
+                mark_done = callbacks.get("finished")
+                def finished(job):
+                    self.clean_run(preview.directory)
+                    if mark_done:
+                        mark_done(job)
+                operation = self.jobs.start("pqa", lambda job: self.run_paper(preview, job),
+                                            **(callbacks | {"finished": finished}))
+            else:
+                if entry:
+                    self.projects.transition(project, entry, ("Awaiting approval",), "Cancelled", preview_id=None)
+                shutil.rmtree(preview.directory, ignore_errors=True)
+                operation = None
             self.previews.pop(preview_id)
-        if not approve:
-            shutil.rmtree(preview.directory, ignore_errors=True)
-            return None
-        try:
-            return self.jobs.start("pqa", lambda job: self.run_paper(preview, job))
-        except BaseException:
-            shutil.rmtree(preview.directory, ignore_errors=True)
-            raise
+            return operation
 
     def run_paper(self, preview, job):
         info = preview.binding
@@ -168,13 +193,15 @@ class Runs:
         try:
             config = settings.load(self.root)
             route, installation, profile = self.paper_route(config)
-            self.projects.selected_pdfs(info["project"], [row["id"] for row in preview.rows], info["project_revision"])
-            if (config.revision != info["settings_revision"] or route["lock_sha256"] != info["lock"]
+            selected = self.projects.selected_pdfs(info["project"], [row[0] for row in info["files"]])
+            if ([[row["id"], row["original_name"], row["sha256"]] for row in selected] != info["files"]
+                    or digest(config.values["RAH_OPENROUTER_API_KEY"].encode()) != info["credential"]
+                    or route["lock_sha256"] != info["lock"]
                     or installation.name != info["install"] or info["profile"] != profile
                     or digest(canonical(info)) != preview.digest):
                 raise Problem("stale_preview", "The PDF route or settings changed. Review the selection again.", 409)
             corpus = private_directory(child(folder, "corpus"))
-            for row in preview.rows:
+            for row in selected:
                 staged = child(corpus, row["storage_name"])
                 shutil.copyfile(self.projects.artifact_path(row), staged)
                 if file_digest(staged) != row["sha256"]:
@@ -188,16 +215,20 @@ class Runs:
                 "PYTHON_DOTENV_DISABLED": "1", "NO_PROXY": "*",
             }
             record = {"app": "pqa", "project": info["project"], "version": route["upstream_version"],
-                      "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"]} for row in preview.rows]}
-            return self.invoke(folder, venv_python(installation / "venv"), env, {"app": "pqa", "question": info["question"], "profile": profile}, record)
+                      "entry": info["entry"], "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"]} for row in preview.rows]}
+            question = info["question"]
+            if info["quote"]:
+                question += "\n\nUser-selected excerpt:\n" + info["quote"]
+            return self.invoke(folder, venv_python(installation / "venv"), env,
+                               {"app": "pqa", "question": question, "profile": profile}, record)
         finally:
             self.clean_run(folder)
 
-    def public_report(self, project, question, mode, spec, version, job):
+    def public_report(self, project, question, mode, spec, version, job, *, entry=None):
         job.checkpoint(final=True)
         folder = private_directory(self.folder(job.id))
         args = [str(value) for value in spec.command] + ["--report_type", mode, "--no-pdf", "--no-docx", "--", question]
-        record = {"app": "gptr", "project": project, "version": version}
+        record = {"app": "gptr", "project": project, "version": version, "entry": entry}
         try:
             return self.invoke(folder, sys.executable, clean_env(), {"app": "gptr", "command": args, "env": spec.env}, record)
         finally:
@@ -238,7 +269,7 @@ class Runs:
             result = read_json(child(folder, "result.json"))
             artifact = self.projects.register(record["project"], io.BytesIO(result["answer"].encode()),
                                               "PaperQA2 answer.md", "answer", app="pqa", version=record["version"],
-                                              run_id=folder.name, bib=result.get("bib"))
+                                              run_id=folder.name, bib=result.get("bib"), entry=record.get("entry"))
         else:
             outputs = child(folder, "outputs")
             files = list(outputs.glob("*.md"))
@@ -247,5 +278,5 @@ class Runs:
             path = child(outputs, files[0].name)
             with path.open("rb") as report:
                 artifact = self.projects.register(record["project"], report, path.name, "report",
-                                                  app="gptr", version=record["version"], run_id=folder.name)
+                                                  app="gptr", version=record["version"], run_id=folder.name, entry=record.get("entry"))
         return {"artifact_id": artifact, "submitted_files": record.get("files", [])}

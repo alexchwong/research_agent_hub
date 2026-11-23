@@ -6,18 +6,33 @@
 <title>Research Agent Hub</title>
 <link rel="stylesheet" href="/assets/app.css">
 <script src="/assets/app.js" defer></script>
+<script src="/assets/workspace.js" defer></script>
 </head>
 <body>
-<header>
-<div class="brand">Research Agent Hub <small>0.1.0</small></div>
-<nav aria-label="Main navigation">
-<button data-view="apps">Apps</button><button data-view="workflows">Workflows</button><button data-view="usage">Usage</button><button data-view="settings">Settings</button>
-</nav>
-<button id="quit" class="quit">Quit hub</button>
-</header>
-<main>
-<p id="message" role="status" aria-live="polite"></p>
-<div id="view"><p>Open Research Agent Hub from the desktop launcher to connect.</p></div>
-</main>
+<div class="shell">
+  <aside id="sidebar" aria-label="Projects and chats">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">R</span><span>Research<br>Agent Hub</span></div>
+    <button id="new-chat" class="new-chat" disabled><span aria-hidden="true">＋</span> New chat</button>
+    <div class="sidebar-scroll">
+      <div class="sidebar-heading"><h2>Recent chats</h2></div>
+      <nav id="recent" aria-label="Recent chats"></nav>
+      <div class="sidebar-heading"><h2>Projects</h2><button id="new-project" aria-label="New project" title="New project" disabled>＋</button></div>
+      <nav id="projects" aria-label="Projects"></nav>
+    </div>
+    <nav class="sidebar-footer" aria-label="Hub tools">
+      <button data-view="settings" disabled>Settings</button><button data-view="apps" disabled>App details</button>
+      <button data-view="usage" disabled>Usage</button><button data-view="workflows" disabled>Workflows</button>
+    </nav>
+  </aside>
+  <main>
+    <header class="topbar">
+      <button id="sidebar-toggle" aria-label="Toggle sidebar" aria-controls="sidebar" aria-expanded="true" title="Toggle sidebar">☰</button>
+      <div id="breadcrumbs">Workspace</div>
+      <div id="project-tools"></div>
+    </header>
+    <p id="message" role="status" aria-live="polite"></p>
+    <div id="view"><p class="connection">Open Research Agent Hub from the desktop launcher to connect.</p></div>
+  </main>
+</div>
 </body>
 </html>

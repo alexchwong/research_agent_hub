@@ -18,7 +18,7 @@ if subprocess.check_output([uv, "--version"], text=True).split()[1] != "0.13.9":
     raise SystemExit("The bootstrap uv does not match the release.")
 root.mkdir(parents=True, exist_ok=True)
 if shutil.disk_usage(root).free < 512 * 1024**2:
-    raise SystemExit("Free at least 512 MB for the hub. Core app space is checked separately.")
+    raise SystemExit("Free at least 512 MB for the hub. Core apps need additional disk space.")
 release = hashlib.sha256((bundle / "hub.lock").read_bytes()).hexdigest()
 runtime = root / "installs" / release
 runtime.mkdir(parents=True, exist_ok=True)
@@ -40,7 +40,7 @@ try:
                         "--only-binary", ":all:", "--no-index", "--find-links", bundle / "wheelhouse",
                         bundle / "hub.lock"], check=True)
         (runtime / "ready").touch()
-    subprocess.run([python_in(venv), "-m", "rah.cli", "--data-dir", root,
-                    "setup", "--uv", retained_uv], check=True)
+    raise SystemExit(subprocess.run([python_in(venv), "-m", "rah.cli", "--data-dir", root,
+                                     "setup", "--uv", retained_uv]).returncode)
 finally:
     lock.rmdir()

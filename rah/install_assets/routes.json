@@ -1,5 +1,41 @@
 {
   "schema_version": 1,
+  "paper_profiles": {
+    "openrouter-text-v1": {
+      "status": "verified",
+      "reference": "PaperQA2 35-check installed-hub report and process trace, 2026-11-22 (see docs/integrations.md)",
+      "worker_sha256": "3f90ded02a30017649cec86f534680697f0223ed523262c65147c5df52b7e9c1",
+      "python": "3.12.14",
+      "upstream_version": "2026.8.12",
+      "policy": "single-provider-no-fallback",
+      "lock_sha256": [
+        "03fde5bf1872f2f7100b3c62238d477875ae022e80f5137de4653af6789eabe8",
+        "73c5159aa9fda38cda3d80de378268e46b7a8319ddd5c499c698e7189ad85308"
+      ],
+      "roles": {
+        "answer": {
+          "model": "openai/gpt-4.1-mini",
+          "provider": "Azure",
+          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
+        },
+        "summary": {
+          "model": "openai/gpt-4.1-mini",
+          "provider": "Azure",
+          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
+        },
+        "agent": {
+          "model": "openai/gpt-4.1-mini",
+          "provider": "Azure",
+          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
+        },
+        "embedding": {
+          "model": "openai/text-embedding-3-small",
+          "provider": "Azure",
+          "endpoint": "https://openrouter.ai/api/v1/embeddings"
+        }
+      }
+    }
+  },
   "routes": [
     {
       "app_id": "ldr",
@@ -9,7 +45,7 @@
       "python_build": "3.12.14",
       "artifacts": [],
       "lock_path": "ubuntu-ldr.lock",
-      "lock_sha256": "385a2dfdb91565091086cabaf597f91fc896061bec4c147b1a00063df9288fd9",
+      "lock_sha256": "cce054be3f65d79aa739f406caf63740f80efe6f7234358a18d3d1eb29e86d4e",
       "licence": "MIT",
       "notices": [
         "local-deep-research upstream distribution"
@@ -79,7 +115,7 @@
         }
       ],
       "lock_path": "ubuntu-gptr.lock",
-      "lock_sha256": "3815dac17798b5a692816566713b3b575617944cf9a5af63fd15929fc39ecae7",
+      "lock_sha256": "9dca24204542f67d49f8719fe0a387ca27f460220f95970f85e2d09275f61725",
       "licence": "Apache-2.0 source; MIT PyPI metadata",
       "notices": [
         "gpt-researcher upstream distribution",
@@ -169,7 +205,8 @@
       ],
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
-      "evidence_status": "candidate"
+      "evidence_status": "candidate",
+      "paper_profile": "openrouter-text-v1"
     },
     {
       "app_id": "ldr",
@@ -179,7 +216,7 @@
       "python_build": "3.12.14",
       "artifacts": [],
       "lock_path": "windows-ldr.lock",
-      "lock_sha256": "e043060c6056e01e76ad311e6c5ff03aeaf4a3cf1388771d0cec03108b2b0d97",
+      "lock_sha256": "f586993918bb4418b9dae1d694c8d76a0c89d92c82a4c795bdfd49c6dd4dedb9",
       "licence": "MIT",
       "notices": [
         "local-deep-research upstream distribution"
@@ -249,7 +286,7 @@
         }
       ],
       "lock_path": "windows-gptr.lock",
-      "lock_sha256": "2f5cdee4b700992342cc7fb1b19ab4b551aa0942d83768d868a573914fb98e36",
+      "lock_sha256": "c7621632eba796296381c968009957e38d3335c1584fb3bc18119e31753bb0ad",
       "licence": "Apache-2.0 source; MIT PyPI metadata",
       "notices": [
         "gpt-researcher upstream distribution",
@@ -339,7 +376,8 @@
       ],
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
-      "evidence_status": "candidate"
+      "evidence_status": "candidate",
+      "paper_profile": "openrouter-text-v1"
     },
     {
       "app_id": "ldr",
@@ -349,7 +387,7 @@
       "python_build": "3.12.14",
       "artifacts": [],
       "lock_path": "macos-ldr.lock",
-      "lock_sha256": "5f2d264ba4912418e3c40802b70e008730231f559abfa82970da50b1446f763d",
+      "lock_sha256": "3c7c92c70a21f356e27df51fca55dd2e403b7b429c549d94158cce8c349faaeb",
       "licence": "MIT",
       "notices": [
         "local-deep-research upstream distribution"
@@ -418,7 +456,7 @@
         }
       ],
       "lock_path": "macos-gptr.lock",
-      "lock_sha256": "e932ec39f4df591546673c263c5060b857264a2bef60858261c769f2ff8d7a4b",
+      "lock_sha256": "a46235a187da098cef91aced9459f0b0280174dd3520695227abbe89ddc5b220",
       "licence": "Apache-2.0 source; MIT PyPI metadata",
       "notices": [
         "gpt-researcher upstream distribution",
@@ -508,7 +546,8 @@
       ],
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
-      "evidence_status": "candidate"
+      "evidence_status": "candidate",
+      "paper_profile": "openrouter-text-v1"
     }
   ]
 }

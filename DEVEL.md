@@ -10,6 +10,7 @@ python3.12 -m venv .venv
 .venv/bin/uv pip sync --python .venv/bin/python --require-hashes --only-binary=:all: dev-deps.lock
 .venv/bin/python -m pytest -q -m 'not live'
 node --check rah/static/app.js
+node --check rah/static/workspace.js
 ```
 
 On Windows PowerShell, with a 3.12.14 interpreter selected:
@@ -20,6 +21,7 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\uv.exe pip sync --python .venv\Scripts\python.exe --require-hashes --only-binary=:all: dev-deps.lock
 .\.venv\Scripts\python.exe -m pytest -q -m 'not live'
 node --check rah/static/app.js
+node --check rah/static/workspace.js
 ```
 
 Verify the interpreter is 3.12.14 before creating a fresh venv. These commands assume the working directory is the checkout root. The offline suite needs no credentials and blocks non-loopback networking in the test process. To regenerate the dev lock without changing the runtime pins:
@@ -108,18 +110,20 @@ On Windows PowerShell:
   --release-dir "$PWD/.release-test/release-assets"
 ```
 
-Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry, then install the three apps from the dashboard on the actual target OS. Check first run, shortcut, restart, and reinstallation with existing data.
+Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry on each target. One confirmation provisions the hub and all three apps. Check first launch, shortcut, restart and reinstallation with existing data.
 
-## PaperQA2 live verification — one command, one JSON
+`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root before exercising an in-place upgrade. RAH keeps SQLite’s base schema at version 1 and applies `rah/workspace.sql` once in a transaction. Old project files keep their paths and papers keep their edit revision.
 
-Use the installed hub from the verification section above, Python 3.12.14 and an authorised OpenRouter test key. Each setup command below creates a fresh RAH data directory under `.release-test`. The script writes test model settings and creates a synthetic project there. Use a test key without prompt logging or external trace export. The script sends a small synthetic corpus and probes to OpenRouter and may incur charges. It never uses your research files.
+## Optional maintainer diagnostic for a changed PaperQA2 route
 
-1. From the repository root, create the disposable data directory and start RAH. Then install the core apps in the dashboard. Omit `--no-shortcut` for a separate desktop-shortcut acceptance exercise.
+This diagnostic is for maintainers investigating a materially changed route. Normal setup and use rely on the packaged profile and its existing live evidence. Use the installed hub from the verification section above, Python 3.12.14 and an authorised OpenRouter test key. Each setup command below creates a fresh RAH data directory under `.release-test`. The script writes test model settings and creates a synthetic project there. Use a test key without prompt logging or external trace export. The script sends a small synthetic corpus and probes to OpenRouter and may incur charges. It never uses your research files.
+
+1. From the repository root, create the disposable data directory and provision the core apps in one setup command. Omit `--no-shortcut` for a separate desktop-shortcut acceptance exercise.
 
    ```bash
    paperqa_data="$(mktemp -d "$PWD/.release-test/paperqa2-live.XXXXXXXX")"
    ./.release-test/installed-hub/bin/python -m rah.cli --data-dir "$paperqa_data" \
-     setup --uv "$PWD/.venv/bin/uv" --no-shortcut
+     setup --uv "$PWD/.venv/bin/uv" --no-shortcut --no-browser
    ```
 
    On Windows PowerShell:
@@ -127,10 +131,10 @@ Use the installed hub from the verification section above, Python 3.12.14 and an
    ```powershell
    $paperqaData = Join-Path "$PWD/.release-test" ("paperqa2-live-" + [guid]::NewGuid().ToString("N"))
    .\.release-test\installed-hub\Scripts\python.exe -m rah.cli --data-dir "$paperqaData" `
-     setup --uv "$PWD/.venv/Scripts/uv.exe" --no-shortcut
+     setup --uv "$PWD/.venv/Scripts/uv.exe" --no-shortcut --no-browser
    ```
 
-2. Once the apps are installed, quit the dashboard for that data directory. Set `OPENROUTER_API_KEY` in your environment using your normal secret entry method. Run the live check from the same shell so it uses the data directory created in step 1.
+2. Once the apps are installed, stop the disposable hub with its Quit command, or run `rah remove-hub --no-shortcut` with that same data directory. The latter keeps the native apps and settings. Set `OPENROUTER_API_KEY` in your environment using your normal secret entry method. Run the live check from the same shell so it uses the data directory created in step 1.
 
    ```bash
    ./.release-test/installed-hub/bin/python scripts/live_paperqa2_dataflow.py \
@@ -144,6 +148,6 @@ Use the installed hub from the verification section above, Python 3.12.14 and an
      --live --require-hub --data-dir "$paperqaData" --report reports/paperqa2-live.json
    ```
 
-3. Return **only `reports/paperqa2-live.json`** for review. Exit `0` means PASS for the script's observations, `1` means FAIL and `2` means INCONCLUSIVE. To repeat the full check, start at step 1 to create a fresh data directory. In release-candidate mode the script uses a temporary in-memory route record while the shipping gate remains closed. It exercises the normal APIs and the installed native worker. The report states whether it exercised a final packaged verified row or the in-memory candidate.
+3. Inspect only `reports/paperqa2-live.json` for review. Exit `0` means PASS, `1` means FAIL, and `2` means INCONCLUSIVE for the observed checks. To repeat the check, create a fresh data directory. The installed-hub diagnostic uses the actual packaged profile and records the API error message on a failed hub request.
 
 Without `--require-hub`, the command diagnoses the native transport and may use fallback test settings. That result does not qualify the installed hub. The single report covers Python-process observation and limits. Release review separately records any independent host capture and the desktop workflow evidence in [docs/releases.md](docs/releases.md).

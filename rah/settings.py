@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from importlib import resources
 import io
 import json
 import os
@@ -13,12 +14,10 @@ ROLES = {
     "gptr": {"FAST": "FAST_LLM", "SMART": "SMART_LLM", "STRATEGIC": "STRATEGIC_LLM", "EMBEDDING": "EMBEDDING"},
     "pqa": {"ANSWER": "llm", "SUMMARY": "summary_llm", "AGENT": "agent.agent_llm", "EMBEDDING": "embedding"},
 }
-PAPER_MODELS = {
-    "answer": "openai/gpt-4.1-mini",
-    "summary": "openai/gpt-4.1-mini",
-    "agent": "openai/gpt-4.1-mini",
-    "embedding": "openai/text-embedding-3-small",
-}
+PAPER_PROFILE = "openrouter-text-v1"
+PAPER_MODELS = {role: entry["model"] for role, entry in json.loads(
+    resources.files("rah").joinpath("install_assets/routes.json").read_text(encoding="utf-8")
+)["paper_profiles"][PAPER_PROFILE]["roles"].items()}
 PAPER_SUGGESTIONS = {f"RAH_PQA_{role.upper()}": f"openrouter:{model}"
                      for role, model in PAPER_MODELS.items()}
 COMMON = {"RAH_OPENROUTER_API_KEY", "RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL", "RAH_PQA_SETTINGS_FILE"}
@@ -83,13 +82,16 @@ def seed(root):
         pass
 
 
-def checked_projection(root, app, config):
+def checked_projection(root, app, config, *, effective=None):
     try:
         stored = applied(root, app)
         if isinstance(stored, dict):
             checksum = stored.pop("checksum", None)
-            if stored.get("revision") == config.revision and checksum == digest(canonical(stored)):
-                return stored
+            if checksum == digest(canonical(stored)):
+                if effective is None and stored.get("revision") == config.revision:
+                    return stored
+                if effective is not None and all(stored.get(key) == effective[key] for key in ("models", "env", "args", "native_file")):
+                    return stored
     except (ValueError, OSError):
         pass
     raise Problem("settings_stale", "Apply saved settings before continuing.", 409)

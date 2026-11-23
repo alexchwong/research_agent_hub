@@ -2,9 +2,24 @@
 
 const view = document.querySelector("#view");
 const message = document.querySelector("#message");
-let token = location.hash.slice(1);
-if (location.hash) history.replaceState({}, "", "/");
-if (!/^[0-9a-f]{64}$/.test(token)) token = "";
+let token = "";
+function storeToken(value) {
+  token = value;
+  try {
+    if (value) sessionStorage.setItem("rah-token", value);
+    else sessionStorage.removeItem("rah-token");
+  } catch (_) { /* This tab can use its in-memory token. */ }
+}
+const launcherToken = location.hash.slice(1);
+if (/^[0-9a-f]{64}$/.test(launcherToken)) {
+  history.replaceState({}, "", "/");
+  storeToken(launcherToken);
+} else {
+  try {
+    const saved = sessionStorage.getItem("rah-token");
+    if (/^[0-9a-f]{64}$/.test(saved || "")) token = saved;
+  } catch (_) { /* Storage may be disabled. */ }
+}
 let screen;
 
 function element(tag, text) {
@@ -41,6 +56,7 @@ function section(parent, title, text) {
 function control(parent, label, tag = "input", type) {
   const wrapper = element("label", label);
   const input = element(tag);
+  input.setAttribute("aria-label", label);
   if (type) input.type = type;
   wrapper.append(input);
   parent.append(wrapper);
@@ -67,7 +83,7 @@ function external(label, url) {
 
 async function api(path, data, raw = false) {
   const headers = {"Authorization": "Bearer " + token};
-  const options = {headers, credentials: "omit", redirect: "error"};
+  const options = {headers, mode: "same-origin", credentials: "omit", redirect: "error", referrerPolicy: "same-origin"};
   if (data !== undefined) {
     options.method = "POST";
     if (data instanceof FormData) options.body = data;
@@ -78,8 +94,11 @@ async function api(path, data, raw = false) {
   }
   const response = await fetch("/api" + path, options);
   if (!response.ok) {
+    if (response.status === 401) storeToken("");
     const result = await response.json();
-    throw new Error(result.message || "The operation failed.");
+    const error = new Error(result.message || "The operation failed.");
+    error.code = result.code;
+    throw error;
   }
   return raw ? response : response.json();
 }
@@ -121,47 +140,11 @@ async function apps() {
   if (screen !== "apps") return;
   const grid = element("div");
   grid.className = "grid app-grid";
-  view.replaceChildren(element("h1", "Apps"));
-  const incomplete = rows.filter(app => !app.current);
-  if (incomplete.length) {
-    const setup = section(view, "Core setup");
-    const plan = element("div");
-    const label = rows.some(app => app.current) ? "Retry incomplete apps" : "Install three research apps";
-    setup.append(button(label, async () => {
-      const info = await api("/apps/core/install-plan");
-      plan.replaceChildren();
-      for (const item of info.apps) {
-        const detail = section(plan, item.name, item.installed ? "Already installed" :
-          (item.plan ? "To be installed" : "No install bundle for this host"));
-        if (item.plan && !item.installed) {
-          const size = item.plan.estimated_bytes;
-          detail.append(element("p", size ? "Downloads locked packages · " + Math.ceil(size / (1024 ** 2)) +
-            " MB estimated" : "Downloads and installs locked packages in the hub data folder."));
-          const details = element("details");
-          details.append(element("summary", "Dependencies and prerequisites"));
-          installDetails(details, item.plan);
-          detail.append(details);
-        }
-      }
-      plan.append(button("Confirm and install", async () => {
-        const run = await api("/apps/core/install", {digest: info.digest});
-        await progress(plan, run.operation_id, async result => {
-          if (result.complete) {
-            await apps();
-            say("All three core apps are installed.");
-          } else {
-            plan.append(button("Review incomplete apps", apps));
-            say("Review the per-app results and retry incomplete apps.");
-          }
-        });
-        if (plan.isConnected && !plan.querySelector("[data-retry]")) {
-          const retry = button("Refresh app status", apps);
-          retry.dataset.retry = "true";
-          plan.append(retry);
-        }
-      }));
-    }), plan);
-  }
+  view.replaceChildren(element("h1", "App details"), button("Quit hub", async () => {
+    await api("/quit", {});
+    storeToken("");
+    location.replace("/");
+  }));
   view.append(grid);
   for (const app of rows) {
     const card = section(grid, app.name, app.state === "Exited" ? "Failed" : app.current ? "Ready" : "Needs setup");
@@ -170,13 +153,19 @@ async function apps() {
       element("p", (app.version || "Pin " + app.candidate) + " · " + app.state));
     if (app.id === "pqa") {
       const reason = app.paper_analysis?.reason;
-      const analyse = button("Analyse papers", () => choose("analysis"));
-      analyse.className = "primary";
-      card.append(analyse);
       if (reason) card.append(element("p", reason));
     }
     if (app.configuration) card.append(element("p", app.configuration));
     if (!app.installable) card.append(element("p", "See the release documentation for platform status."));
+    if (!app.current && app.installable) {
+      const status = element("div");
+      card.append(button("Retry " + app.name, async () => {
+        const info = await api("/apps/" + app.id + "/install-plan");
+        const run = await api("/apps/" + app.id + "/install", {digest: info.digest});
+        status.replaceChildren();
+        await progress(status, run.operation_id, apps);
+      }), status);
+    }
     if (app.current) {
       const install = element("div");
       advanced.append(button("Review reinstall", async () => {
@@ -198,7 +187,7 @@ async function apps() {
         const state = element("p");
         let result = await api("/apps/" + app.id + "/launch", {});
         if (result.command_line) {
-          running.append(element("pre", result.command_line), button("Copy standalone command", () => navigator.clipboard.writeText(result.command_line)));
+          running.append(element("p", result.note), element("pre", result.command_line), button("Copy standalone command", () => navigator.clipboard.writeText(result.command_line)));
           return;
         }
         running.append(state, stop);
@@ -258,20 +247,28 @@ const modelLabels = {
 };
 const credentialLabels = {
   RAH_OPENROUTER_API_KEY: "Shared OpenRouter key",
+  RAH_NATIVE_GPTR__OPENAI_API_KEY: "GPT Researcher OpenAI key",
+  RAH_NATIVE_GPTR__TAVILY_API_KEY: "GPT Researcher Tavily key",
 };
 
 async function settings() {
   const info = await api("/settings");
   if (screen !== "settings") return;
   view.replaceChildren(element("h1", "Settings"));
-  const managed = section(view, "Shared and app settings", "Blank roles inherit the relevant chat or embedding default. Enter native to release an override or openrouter:model for an explicit selection.");
-  managed.append(element("p", "The shared key applies to OpenRouter roles. Release the LDR override and restart to use its native model controls."));
+  const managed = section(view, "OpenRouter");
+  const advanced = element("details");
+  advanced.className = "settings-credentials";
+  advanced.append(element("summary", "Advanced"), element("p", "Blank roles inherit a shared model when configured. Enter native to use the app’s own settings."));
+  const recommendations = element("div");
+  const actions = element("div");
+  view.append(actions, advanced);
   const nativeDetails = element("details");
+  nativeDetails.className = "settings-credentials";
   nativeDetails.append(element("summary", "Native configuration and search credentials"));
   const changes = {};
   const cleared = {};
   for (const [key, value] of Object.entries(info.values)) {
-    const input = control(modelLabels[key] ? managed : nativeDetails, modelLabels[key] || key);
+    const input = control(modelLabels[key] ? advanced : nativeDetails, modelLabels[key] || key);
     input.value = value;
     changes[key] = input;
   }
@@ -284,7 +281,7 @@ async function settings() {
     const roles = family === "chat" ? ["LDR_CHAT", "GPTR_FAST", "GPTR_SMART", "GPTR_STRATEGIC",
       "PQA_ANSWER", "PQA_SUMMARY", "PQA_AGENT"] : ["GPTR_EMBEDDING", "PQA_EMBEDDING"];
     for (const role of roles) changes["RAH_" + role].setAttribute("list", roleModels.id);
-    managed.append(button("Browse OpenRouter " + family + " models", async () => {
+    advanced.append(button("Browse OpenRouter " + family + " models", async () => {
       const catalog = await api("/models/" + family + "?details=1");
       const models = catalog.models;
       say(catalog.stale ? "Showing saved or release model suggestions. Live data is unavailable." :
@@ -304,12 +301,17 @@ async function settings() {
       }
     }), defaults, roleModels);
   }
-  managed.append(button("Use managed PaperQA2 models", () => {
-    for (const [key, value] of Object.entries(info.paper_suggestions)) changes[key].value = value;
-    say("Review and save the four PaperQA2 model settings.");
-  }));
+  managed.append(button("Use recommended settings", () => {
+    const list = element("ul");
+    for (const [key, value] of Object.entries(info.paper_suggestions)) {
+      const old = changes[key].value;
+      changes[key].value = value;
+      list.append(element("li", (modelLabels[key] || key) + " · " + (old || "Blank") + " → " + value));
+    }
+    recommendations.replaceChildren(element("p", "PaperQA2 changes to apply when you save"), list);
+  }), recommendations);
   for (const [app, prefix] of [["LDR", "LDR_"], ["GPT Researcher", "GPTR_"], ["PaperQA2", "PQA_"]]) {
-    managed.append(button("Reset " + app + " to native", () => {
+    advanced.append(button("Reset " + app + " to native", () => {
       for (const key of Object.keys(modelLabels).filter(key => key.startsWith("RAH_" + prefix))) {
         changes[key].value = "native";
       }
@@ -317,23 +319,29 @@ async function settings() {
     }));
   }
   for (const [key, exists] of Object.entries(info.credentials)) {
-    const parent = credentialLabels[key] ? managed : nativeDetails;
+    const parent = key === "RAH_OPENROUTER_API_KEY" ? managed : nativeDetails;
     changes[key] = control(parent, (credentialLabels[key] || key) + (exists ? " · Saved" : ""), "input", "password");
+    changes[key].dataset.key = key;
     if (exists) cleared[key] = control(parent, "Clear " + (credentialLabels[key] || key), "input", "checkbox");
   }
-  managed.append(nativeDetails, button("Save settings", async () => {
+  advanced.append(nativeDetails);
+  const save = button("Save", async () => {
     const result = await api("/settings", {revision: info.revision,
       changes: Object.fromEntries(Object.entries(changes).map(([name, input]) => [name, input.value])),
       clear: Object.keys(cleared).filter(name => cleared[name].checked)});
     await settings();
-    say(Object.values(result.failures).join(" ") || "Settings saved for the next launch.");
-  }));
+    const labels = {ldr: "Local Deep Research", gptr: "GPT Researcher", pqa: "PaperQA2"};
+    const problems = Object.entries(result.failures).map(([name, reason]) => labels[name] + " · " + reason);
+    say(problems.length ? "Saved. " + problems.join(" ") : "Saved and applied.");
+  });
+  save.className = "primary";
+  actions.append(save);
   for (const [name, states] of Object.entries(info.states)) {
-    const card = section(view, {ldr: "Local Deep Research", gptr: "GPT Researcher", pqa: "PaperQA2"}[name]);
+    const card = section(advanced, {ldr: "Local Deep Research", gptr: "GPT Researcher", pqa: "PaperQA2"}[name]);
     for (const [role, state] of Object.entries(states)) card.append(element("p", role + " · " + state));
   }
-  const overwrite = control(view, "Regenerate edited generated profiles", "input", "checkbox");
-  view.append(button("Apply saved settings", async () => {
+  const overwrite = control(advanced, "Regenerate edited generated profiles", "input", "checkbox");
+  advanced.append(button("Apply saved settings", async () => {
     const result = await api("/settings/apply", {revision: info.revision, regenerate: overwrite.checked});
     await settings();
     say(Object.values(result.failures).join(" ") || "Settings applied.");
@@ -347,21 +355,11 @@ const recipes = [
   ["Independent report comparison", "Run the public question independently in LDR and GPT Researcher. Attach the original cited reports and choose two to compare. Search and model services may charge for both runs."],
 ];
 
-async function workflows(analysis = false) {
-  const projects = await api("/projects");
-  if (!["workflows", "analysis"].includes(screen)) return;
-  view.replaceChildren(element("h1", analysis ? "Analyse papers" : "Workflows"));
+function workflows() {
   const grid = element("div");
   grid.className = "grid";
-  if (!analysis) view.append(grid);
-  if (!analysis) recipes.forEach(([title, steps]) => section(grid, title, steps));
-  const list = section(view, "Projects");
-  for (const project of projects) list.append(button(project.name, () => showProject(project.id)));
-  const name = control(list, "New project name");
-  list.append(button("Create project", async () => {
-    const item = await api("/projects", {name: name.value});
-    await showProject(item.id);
-  }));
+  view.replaceChildren(element("h1", "Workflows"), grid);
+  recipes.forEach(([title, steps]) => section(grid, title, steps));
 }
 
 const citationFields = [["title", "Title"], ["doi", "DOI"], ["pmid", "PMID"], ["citation_url", "Citation URL"], ["note", "Upstream note"]];
@@ -394,13 +392,13 @@ async function download(project, item, bib = false) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function showProject(id, answerId) {
+async function showProject(id, answerId, panel) {
   const project = await api("/projects/" + id);
-  if (!["workflows", "analysis"].includes(screen)) return;
+  if (panel !== screen) return;
   const path = "/projects/" + id;
   const pdfs = project.artifact.filter(item => item.kind === "pdf");
-  view.replaceChildren(button("All projects", () => workflows(screen === "analysis")), element("h1", project.name),
-    button("Open project folder", async () => { await api(path + "/open-folder", {}); }));
+  view.replaceChildren(element("h1", panel === "papers" ? "Papers Needed" : "Files"));
+  if (panel !== "papers") view.append(button("Open project folder", async () => { await api(path + "/open-folder", {}); }));
   if (answerId) {
     const response = await api(path + "/artifacts/" + answerId, undefined, true);
     section(view, "PaperQA2 answer and native references").append(element("pre", await response.text()));
@@ -415,7 +413,7 @@ async function showProject(id, answerId) {
       }));
     } else {
       row.append(button("Download", () => download(project, item)));
-      if (item.kind === "answer") row.append(button("View answer and references", () => showProject(id, item.id)));
+      if (item.kind === "answer") row.append(button("View answer and references", () => showProject(id, item.id, panel)));
       if (item.kind === "answer" && item.has_bib) {
         row.append(button("Download native citations", () => download(project, item, true)));
       }
@@ -452,9 +450,13 @@ async function showProject(id, answerId) {
     form.set("revision", project.revision);
     form.set("kind", file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "report");
     await api(path + "/files", form);
-    await showProject(id);
+    await showProject(id, undefined, panel);
   }));
-  const papers = section(view, "Papers Needed", "Use your own access to obtain missing PDFs. Upload them, then associate each file with its paper.");
+  if (panel === "files") return;
+  view.replaceChildren(element("h1", "Papers Needed"));
+  const papers = section(view, project.name, "Use your own access to obtain missing PDFs. Add files from the Files view, then associate each PDF with its paper.");
+  const supplied = pdfs.filter(pdf => project.paper.some(item => item.state === "supplied" && item.pdf_artifact_id === pdf.id));
+  if (supplied.length) papers.append(button("Use supplied PDFs in chat", () => suppliedInChat(id, supplied)));
   const paste = control(papers, "Paste citations", "textarea");
   let importExport;
   if (project.capabilities.structured_citations) {
@@ -478,7 +480,7 @@ async function showProject(id, answerId) {
     });
     if (editors.length) draft.append(button("Save selected rows", async () => {
       await api(path + "/papers", {revision: project.revision, rows: editors.filter(([keep]) => keep.checked).map(([, read]) => read())});
-      await showProject(id);
+      await showProject(id, undefined, panel);
     }));
   }
   papers.append(button("Preview pasted citations", async () => preview(await api(path + "/papers/parse", {text: paste.value}))),
@@ -489,92 +491,13 @@ async function showProject(id, answerId) {
     const [card, read] = editor(papers, item, pdfs);
     card.append(button("Save paper changes", async () => {
       await api(path + "/papers", {revision: project.revision, rows: [read()]});
-      await showProject(id);
+      await showProject(id, undefined, panel);
     }));
   }
 
-  const publicRun = section(view, "GPT Researcher", "Use a public question. It is visible to local process inspection and goes to your configured native research services.");
-  publicRun.hidden = screen === "analysis";
-  const publicQuestion = control(publicRun, "Public research question", "textarea");
-  const mode = select(publicRun, "Native report mode", [["research_report", "Research report"], ["deep", "Deep Research"]]);
-  const publicOK = control(publicRun, "I confirm this question is public", "input", "checkbox");
-  publicRun.append(button("Run GPT Researcher", async () => {
-    const result = await api(path + "/gptr-reports", {question: publicQuestion.value, mode: mode.value, public: publicOK.checked});
-    await progress(publicRun, result.operation_id, async () => { await showProject(id); say("Original report saved."); });
-  }));
-
-  const paperRun = section(view, "Continue in PaperQA2", project.capabilities.paper_route ?
-    "Each approved run builds a fresh index from the selected PDFs." :
-    project.capabilities.paper_reason || "Managed PDF transfer is unavailable.");
-  if (!project.capabilities.paper_route) {
-    paperRun.append(button("Open Settings", () => choose("settings")), button("Standalone PaperQA2", () => choose("apps")));
-    return;
-  }
-  const selected = new Map();
-  for (const artifact of pdfs.filter(pdf => project.paper.some(item => item.state === "supplied" && item.pdf_artifact_id === pdf.id))) {
-    selected.set(artifact.id, control(paperRun, artifact.original_name, "input", "checkbox"));
-  }
-  const paperQuestion = control(paperRun, "Question about selected PDFs", "textarea");
-  if (screen === "analysis") paperRun.scrollIntoView();
-  else papers.append(button("Continue in PaperQA2", () => paperRun.scrollIntoView()));
-  paperRun.append(button("Review cloud transfer", async () => {
-    const result = await api(path + "/pqa-preview", {revision: project.revision, question: paperQuestion.value,
-      pdfs: Array.from(selected).filter(([, item]) => item.checked).map(([key]) => key)});
-    const dialog = element("dialog");
-    const title = element("h2", "Confirm PaperQA2 transfer");
-    title.id = "paper-transfer-title";
-    dialog.setAttribute("aria-labelledby", title.id);
-    dialog.append(title, element("p", "PaperQA2 will re-index " + result.reindex +
-      " files. OpenRouter and the listed providers will receive the data below. Charges may apply."),
-      element("p", result.files.join(", ")), element("p", result.question), element("p", result.profile.parser));
-    const destinations = element("ul");
-    for (const dest of result.profile.destinations) {
-      destinations.append(element("li", dest.role + " · " + dest.service + " → " + dest.provider +
-        " · " + dest.model + " · " + dest.data));
-    }
-    const warning = element("p", "Account Zero Data Retention is unverified by RAH. Consider enabling it before sending paper text. ");
-    warning.append(external("Open OpenRouter Privacy Settings", "https://openrouter.ai/settings/privacy"));
-    const error = element("p");
-    error.setAttribute("role", "alert");
-    dialog.append(destinations, warning, error);
-    dialog.append(element("p", "Raw PDFs and page images stay local. The listed services receive text, including citation details that PaperQA2 includes in its prompts."));
-    const exportsChecked = control(dialog, "I confirm that prompt logging and Broadcast or other trace exports exclude this run", "input", "checkbox");
-    let busy = false;
-    async function approve(choice) {
-      if (busy) return;
-      if (choice && !exportsChecked.checked) {
-        error.textContent = "Confirm the account export setting before approval.";
-        return;
-      }
-      busy = true;
-      let run;
-      try {
-        run = await api(path + "/pqa-approve", {preview_id: result.preview_id, binding: result.binding, approve: choice, account_exports_checked: exportsChecked.checked});
-      } catch (problem) {
-        if (choice) {
-          error.textContent = problem.message;
-          busy = false;
-          return;
-        }
-      }
-      dialog.close();
-      dialog.remove();
-      if (run?.operation_id) {
-        await progress(paperRun, run.operation_id, async outcome => {
-          await showProject(id, outcome.artifact_id);
-          say("Original answer saved.");
-        });
-      }
-    }
-    dialog.addEventListener("cancel", event => { event.preventDefault(); approve(false); });
-    dialog.append(button("Cancel", () => approve(false)), button("Approve and run", () => approve(true)));
-    paperRun.append(dialog);
-    dialog.showModal();
-  }));
-
 }
 
-const views = {apps, workflows, usage, settings, analysis: () => workflows(true)};
+const views = {apps, workflows, usage, settings};
 async function choose(name) {
   screen = name;
   document.querySelectorAll("[data-view]").forEach(node => {
@@ -584,17 +507,4 @@ async function choose(name) {
   view.replaceChildren(element("p", "Loading…"));
   try { await views[name](); }
   catch (error) { say(error.message); }
-}
-
-if (token) {
-  document.querySelectorAll("[data-view]").forEach(node => {
-    node.onclick = () => { say(""); choose(node.dataset.view); };
-  });
-  document.querySelector("#quit").onclick = async () => {
-    try { await api("/quit", {}); view.replaceChildren(element("p", "Research Agent Hub has stopped.")); }
-    catch (error) { say(error.message); }
-  };
-  choose("apps");
-} else {
-  document.querySelectorAll("header button").forEach(node => { node.disabled = true; });
 }

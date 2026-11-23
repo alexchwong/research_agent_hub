@@ -64,10 +64,21 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
     remover = ["remove-hub"] + ([] if shortcut else ["--no-shortcut"])
 
     def cli_run(*args, check=True):
-        return subprocess.run([cli, "--data-dir", root, *args], check=check, timeout=60)
+        return subprocess.run([cli, "--data-dir", root, *args], check=check, timeout=2800 if args[0] == "setup" else 60)
 
     try:
-        cli_run(*setup)
+        if not real:
+            lock = bundle / "pqa.lock"
+            original = lock.read_bytes()
+            lock.write_bytes(original + b"\n# changed")
+            try:
+                assert cli_run(*setup, check=False).returncode == 1
+                assert not (root / "apps/pqa/current.json").exists()
+                unchanged = {name: (root / "apps" / name / "current.json").read_bytes() for name in ("ldr", "gptr")}
+            finally:
+                lock.write_bytes(original)
+        else:
+            assert cli_run(*setup, check=packaged).returncode == (0 if len(names) == len(APPS) else 1)
         if shortcut:
             assert shortcut_path().exists(), "Desktop shortcut was not created"
         record = connected(root)
@@ -89,31 +100,20 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
         with opener.open(origin, timeout=10) as response:
             assert b"Research Agent Hub" in response.read()
         installed = {}
-        plan = api("/apps/core/install-plan")
-        assert [item["id"] for item in plan["apps"]] == list(APPS)
         if not real:
-            lock = bundle / "pqa.lock"
-            original = lock.read_bytes()
-            lock.write_bytes(original + b"\n# changed")
-            try:
-                partial = wait(api("/apps/core/install", {"digest": plan["digest"]})["operation_id"], api)
-                assert partial["result"] == {"complete": False}, partial
-                assert partial["apps"]["pqa"]["state"] == "Failed", partial
-                unchanged = {name: (root / "apps" / name / "current.json").read_bytes() for name in ("ldr", "gptr")}
-            finally:
-                lock.write_bytes(original)
-        op = api("/apps/core/install", {"digest": plan["digest"]})
-        info = wait(op["operation_id"], api)
-        if not real:
-            assert info["result"] == {"complete": True}, info
+            plan = api("/apps/pqa/install-plan")
+            partial = wait(api("/apps/pqa/install", {"digest": plan["digest"]})["operation_id"], api)
+            assert partial["state"] == "Succeeded", partial
             for name, pointer in unchanged.items():
                 assert (root / "apps" / name / "current.json").read_bytes() == pointer
             print("A failed app can be retried without replacing successful siblings.", flush=True)
         for name in names:
-            assert info["apps"][name]["state"] == "Installed", (name, info)
             pointer = root / "apps" / name / "current.json"
             installed[name] = json.loads(pointer.read_bytes())
             print(f"Installed {APPS[name]} through native route", flush=True)
+        if len(names) == len(APPS):
+            cli_run("setup", "--no-shortcut", "--no-browser")
+            assert connected(root)["pid"] == record["pid"], "Second setup replaced the healthy hub"
         if packaged:
             for name, expected in (("ldr", b"local deep research"), ("gptr", b"gpt researcher")):
                 try:
@@ -141,6 +141,11 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
                     if next(row for row in api("/apps") if row["id"] == name)["can_stop"]:
                         api(f"/apps/{name}/stop", {})
         if not real:
+            config = api("/settings")
+            saved = api("/settings", {"revision": config["revision"], "changes": {
+                "RAH_NATIVE_GPTR__OPENAI_API_KEY": "synthetic-test",
+                "RAH_NATIVE_GPTR__TAVILY_API_KEY": "synthetic-test"}})
+            assert "gptr" not in saved["failures"]
             first = api("/projects", {"name": "Cross-platform setup smoke"})["id"]
             op = api(f"/projects/{first}/gptr-reports", {"question": "Public fixture", "public": True, "mode": "deep"})
             result = wait(op["operation_id"], api)

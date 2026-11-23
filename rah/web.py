@@ -1,6 +1,5 @@
 import hashlib
 import hmac
-from contextlib import ExitStack
 import re
 from secrets import token_hex
 import shlex
@@ -17,11 +16,11 @@ import webbrowser
 from flask import Flask, jsonify, render_template, request, send_file
 from werkzeug.exceptions import HTTPException
 
-from . import installer, settings, upstreams
-from .common import APPS, Problem, atomic, canonical, child, clean_env, digest, id_value, venv_python
+from . import installer, settings, setup, upstreams
+from .common import APPS, Problem, canonical, child, clean_env, digest, executable, id_value, venv_python
 from .jobs import Jobs
 from .openrouter import NoRedirect, OpenRouter
-from .projects import PDF_LIMIT, Projects, citations, structured_citations
+from .projects import PDF_LIMIT, Projects, UNFILED, citations, structured_citations
 from .runs import Runs
 
 
@@ -52,7 +51,7 @@ def visible_plan(row):
 
 def create_app(root, book, uv, identity, token, stop, address):
     app = Flask(__name__, static_folder="static", static_url_path="/assets")
-    app.config.update(MAX_CONTENT_LENGTH=PDF_LIMIT + 1024 * 1024, MAX_FORM_PARTS=4)
+    app.config.update(MAX_CONTENT_LENGTH=PDF_LIMIT + 1024 * 1024, MAX_FORM_PARTS=5)
     projects = Projects(root)
     jobs = Jobs()
     runs = Runs(root, book, projects, jobs)
@@ -82,6 +81,96 @@ def create_app(root, book, uv, identity, token, stop, address):
             stored = settings.install_projection(root, name, settings.resolve(config, name, cap(name)))
         stored = settings.checked_projection(root, name, config)
         return location, config, upstreams.launch_spec(root, name, location, stored, **options)
+
+    def public_route():
+        if book.route("gptr") and book.route("gptr").get("qualification_only"):
+            raise Problem("unverified_route", "Open the standalone candidate app.", 503)
+        location, _, spec = native("gptr")
+        env = spec.env
+        if env.get("CONFIG_PATH") or settings.LEGACY_GPTR & env.keys():
+            raise Problem("native_configuration", "Open GPT Researcher for external or legacy configuration.", 409)
+        providers = set()
+        for role in settings.ROLES["gptr"].values():
+            provider, separator, model = env.get(role, "openai:default").partition(":")
+            keys = {"openai": "OPENAI_API_KEY", "openrouter": "OPENROUTER_API_KEY"}
+            if not separator or not model or provider not in keys:
+                raise Problem("native_configuration", "Open GPT Researcher to use this model configuration.", 409)
+            if not env.get(keys[provider]):
+                raise Problem("needs_credential", f"Add the {provider} credential for GPT Researcher in Settings.", 409)
+            providers.add({"openai": "OpenAI", "openrouter": "OpenRouter"}[provider])
+        if env.get("RETRIEVER", "tavily").strip() != "tavily":
+            raise Problem("native_configuration", "Open GPT Researcher to use the configured native search service.", 409)
+        if not env.get("TAVILY_API_KEY"):
+            raise Problem("needs_credential", "Add a Tavily key in Settings to run GPT Researcher here.", 409)
+        return location, spec, sorted(providers) + ["Tavily"]
+
+    def available(name, action):
+        if jobs.busy("core") or jobs.busy(name) or jobs.closing:
+            raise Problem("busy", "Wait for the current hub operation.", 409)
+        upstreams.current(root, name, book)
+        if action == "native":
+            return []
+        if name == "gptr":
+            return public_route()[2]
+        runs.paper_route(settings.load(root))
+        return ["OpenRouter", "Azure"]
+
+    @app.get("/api/workspace")
+    def workspace():
+        readiness = {}
+        with lifecycle_lock, config_lock:
+            for name in APPS:
+                try:
+                    recipients = available(name, "native" if name == "ldr" else "managed")
+                    readiness[name] = {"ready": True, "recipients": recipients}
+                except (Problem, OSError) as error:
+                    readiness[name] = {"ready": False, "reason": str(error) if isinstance(error, Problem) else "Repair this installation in App details.",
+                                       "code": error.code if isinstance(error, Problem) else "app_not_installed"}
+        return jsonify(projects=projects.list(), chats=projects.list_chats(), readiness=readiness, unfiled=UNFILED)
+
+    @app.get("/api/projects/<project>/chats/<chat>")
+    def read_chat(project, chat):
+        result = projects.get_chat(project, chat)
+        for item in result["entries"]:
+            if item["state"] == "Awaiting approval":
+                item["review_expired"] = not runs.reviewing(item["preview_id"])
+        return jsonify(result)
+
+    @app.post("/api/projects/<project>/chats/<chat>")
+    def rename_chat(project, chat):
+        data = body()
+        projects.update_chat(project, chat, title=data.get("title"), app=data.get("app"))
+        return jsonify(saved=True)
+
+    @app.post("/api/workspace/requests")
+    def accept_request():
+        data = body()
+        name, action = data.get("app"), data.get("action")
+        if not isinstance(name, str) or name not in APPS or action not in ("managed", "native") or (name == "ldr" and action == "managed"):
+            raise Problem("request_app", "Select an available app and action.")
+        query = question(data) if action == "managed" or data.get("question") else ""
+        mode = data.get("mode")
+        pdfs = data.get("pdfs", [])
+        if not isinstance(pdfs, list) or (pdfs and (name != "pqa" or action != "managed")):
+            raise Problem("pdf_selection", "Only PaperQA2 accepts PDF attachments.")
+        quote = data.get("quote", "")
+        if not isinstance(quote, str) or len(quote) > 8000 or "\0" in quote or (quote and (name != "pqa" or action != "managed")):
+            raise Problem("request_quote", "Only PaperQA2 accepts an explicit excerpt up to 8,000 characters.")
+        if action == "managed" and name == "gptr":
+            if mode not in ("deep", "research_report") or data.get("public") is not True:
+                raise Problem("public_confirmation", "Confirm the current question can be sent to the disclosed providers.")
+        elif mode is not None:
+            raise Problem("request_mode", "This action has no report mode.")
+        title = query.splitlines()[0] if query else APPS[name]
+        with lifecycle_lock, config_lock:
+            entry = projects.accept(data.get("project_id"), data.get("chat_id"), data.get("entry_id"),
+                                    name, action, mode, query, quote, title, pdfs, lambda: available(name, action))
+        return jsonify(entry), 200 if entry["replay"] else 201
+
+    @app.post("/api/projects/<project>/requests/<entry>/discard")
+    def discard_request(project, entry):
+        with lifecycle_lock:
+            return jsonify(projects.transition(project, entry, ("Preparing", "Awaiting approval"), "Cancelled", preview_id=None))
 
     @app.before_request
     def protect():
@@ -138,9 +227,7 @@ def create_app(root, book, uv, identity, token, stop, address):
         return jsonify(signature=hmac.new(identity.encode(), nonce.encode(), hashlib.sha256).hexdigest())
 
     def up_to_date(name):
-        installed = installer.install_location(root, name)
-        route = book.route(name)
-        return bool(installed and route and installed[0]["lock_sha256"] == route["lock_sha256"])
+        return setup.current(root, book, name)
 
     def browser_alive(name):
         service = services.get(name)
@@ -228,37 +315,6 @@ def create_app(root, book, uv, identity, token, stop, address):
         if not uv or not uv.is_file():
             raise Problem("uv_missing", "Run rah setup with the absolute path to the approved uv executable.", 503)
 
-    def install_one(name, job, batch=False):
-        def prepare(directory, publish):
-            with config_lock, ExitStack() as rollback:
-                config = settings.load(root)
-                launcher = upstreams.standalone_path(root, name)
-                if launcher.is_file():
-                    rollback.callback(atomic, launcher, launcher.read_bytes())
-                else:
-                    rollback.callback(launcher.unlink, missing_ok=True)
-                if settings.applied(root, name) is None:
-                    try:
-                        projection = settings.resolve(config, name, cap(name))
-                    except Problem:
-                        # Keep a usable native entry when one app has an invalid guided setting.
-                        projection = settings.resolve(settings.parse(""), name, cap(name))
-                    rollback.callback(child(launcher.parent, "profile.json").unlink, missing_ok=True)
-                    settings.install_projection(root, name, projection)
-                upstreams.prepare_launch(root, name, directory)
-                publish()
-                rollback.pop_all()
-
-        def checkpoint(final=False):
-            job.checkpoint(final=final and not batch)
-
-        def step(message):
-            job.report(name, "Running", message)
-
-        directory = installer.install(root, book, name, uv, checkpoint, prepare, step)
-        job.report(name, "Installed", "Native launcher prepared")
-        return directory
-
     @app.post("/api/apps/core/install")
     def install_core():
         rows, checksum = core_plan()
@@ -266,32 +322,10 @@ def create_app(root, book, uv, identity, token, stop, address):
             raise Problem("install_plan", "Review the current core installation plan first.", 409)
         ensure_uv()
 
-        def execute(job):
-            for name in APPS:
-                job.report(name, "Queued", "Waiting for setup")
-            for name, route in rows.items():
-                job.checkpoint()
-                if up_to_date(name):
-                    job.report(name, "Installed", "Current installation kept")
-                elif not route or browser_alive(name):
-                    job.report(name, "Unavailable", "No bundle for this host" if not route else "Stop this app then retry")
-                else:
-                    try:
-                        install_one(name, job, batch=True)
-                    except Problem as error:
-                        if error.code == "cancelled":
-                            job.report(name, "Cancelled", "Previous files kept")
-                            raise
-                        job.report(name, "Failed", str(error))
-                    except (OSError, ValueError, TypeError, KeyError):
-                        job.report(name, "Failed", "Could not prepare this app. See docs/releases.md, then retry.")
-            job.checkpoint(final=True)
-            return {"complete": all(up_to_date(name) for name in APPS)}
-
         with lifecycle_lock:
             if jobs.busy():
                 raise Problem("busy", "Wait for the current operation before installing core apps.", 409)
-            return jsonify(operation_id=jobs.start("core", execute)), 202
+            return jsonify(operation_id=jobs.start("core", lambda job: setup.install_core(root, book, uv, config_lock, job, browser_alive))), 202
 
     @app.get("/api/apps/<name>/install-plan")
     def install_plan(name):
@@ -309,7 +343,19 @@ def create_app(root, book, uv, identity, token, stop, address):
         with lifecycle_lock:
             if jobs.busy("core") or browser_alive(name):
                 raise Problem("busy", "Stop this app or wait for core setup before reinstalling.", 409)
-            return jsonify(operation_id=jobs.start(name, lambda job: {"location": install_one(name, job)})), 202
+            return jsonify(operation_id=jobs.start(name, lambda job: {"location": setup.install_one(root, book, uv, config_lock, name, job)})), 202
+
+    def native_request(data, name):
+        if not data.get("entry_id"):
+            return None
+        row = projects.entry(data.get("project_id"), data["entry_id"])
+        if row["app"] != name or row["action"] != "native" or row["state"] != "Preparing":
+            raise Problem("request_state", "This native request has already advanced.", 409)
+        return row
+
+    def finish_native(entry, state, reason=None):
+        if entry:
+            projects.transition(entry["project_id"], entry["id"], ("Preparing",), state, reason=reason)
 
     @app.post("/api/apps/<name>/launch")
     def launch(name):
@@ -317,26 +363,50 @@ def create_app(root, book, uv, identity, token, stop, address):
         with lifecycle_lock:
             if jobs.busy("core") or jobs.busy(name) or jobs.closing:
                 raise Problem("busy", "Wait for the app's current operation.", 409)
-            with config_lock:
-                identity_token = token_hex(32)
-                location, config, spec = native(name, browser=name in browsers, identity=identity_token)
-            if not spec.url:
+            entry = native_request(data, name)
+            if name == "pqa":
+                location = upstreams.current(root, name, book)
+                config = settings.load(root)
                 script = child(root, "apps", name, "launch", "native.py")
-                command = [str(venv_python(location / "venv")), str(script)]
+                note = "Run this standalone command in a terminal. Add native subcommands and options as needed."
+                try:
+                    settings.checked_projection(root, name, config, effective=settings.resolve(config, name, cap(name)))
+                    command = [str(venv_python(location / "venv")), str(script)]
+                except Problem:
+                    command = [str(executable(location / "venv", "pqa")), "--help"]
+                    note = "Run this native command in a terminal. Replace --help with a native command and options. To select a native settings file, pass --settings with its absolute path without the .json extension."
                 if sys.platform == "win32":
                     command_line = "& " + " ".join("'" + item.replace("'", "''") + "'" for item in command)
                 else:
                     command_line = shlex.join(command)
-                return jsonify(command=command, command_line=command_line, note="Run this standalone command in a terminal.")
+                finish_native(entry, "Command shown")
+                return jsonify(command=command, command_line=command_line, note=note)
+            with config_lock:
+                identity_token = token_hex(32)
+                if name == "ldr":
+                    location = upstreams.current(root, name, book)
+                    config = settings.load(root)
+                    try:
+                        effective = settings.resolve(config, name, cap(name))
+                        profile = settings.checked_projection(root, name, config, effective=effective)
+                    except Problem:
+                        native_values = {key: value for key, value in config.values.items() if key.startswith("RAH_NATIVE_LDR__")}
+                        native_config = settings.Config(config.text, native_values, config.revision)
+                        profile = settings.resolve(native_config, name, cap(name))
+                    spec = upstreams.launch_spec(root, name, location, profile, browser=True, identity=identity_token)
+                else:
+                    location, config, spec = native(name, browser=True, identity=identity_token)
             if "ready_generation" in data:
                 service = services.get(name)
                 if not service or not browser_alive(name) or data["ready_generation"] != service["generation"]:
                     raise Problem("native_launch_changed", "The native app changed. Open it again.", 409)
                 state = browser_status(name, config)
-                if state["state"] == "Ready" and not service.get("opened"):
-                    service["opened"] = True
-                    Thread(target=webbrowser.open, args=(state["url"],), daemon=True).start()
-                return jsonify(state)
+                if state["state"] == "Ready":
+                    finish_native(entry, "Opened")
+                    if not service.get("opened"):
+                        service["opened"] = True
+                        Thread(target=webbrowser.open, args=(state["url"],), daemon=True).start()
+                return jsonify(state | {"opened": state["state"] == "Ready"})
             if not browser_alive(name):
                 try:
                     with socket.create_connection(("127.0.0.1", browsers[name]), timeout=0.5):
@@ -355,9 +425,12 @@ def create_app(root, book, uv, identity, token, stop, address):
                                   "url": spec.url, "identity": identity_token, "generation": token_hex(16)}
             services[name]["opened"] = False
             state = browser_status(name, config)
-            if data.get("open") is True and state["state"] == "Ready":
+            if state["state"] == "Ready":
+                finish_native(entry, "Opened")
+            if (entry is not None or data.get("open") is True) and state["state"] == "Ready":
+                services[name]["opened"] = True
                 Thread(target=webbrowser.open, args=(state["url"],), daemon=True).start()
-            return jsonify(state)
+            return jsonify(state | {"opened": state["state"] == "Ready"})
 
     @app.get("/api/apps/<name>/browser")
     def observe_browser(name):
@@ -456,11 +529,15 @@ def create_app(root, book, uv, identity, token, stop, address):
         files = request.files.getlist("file")
         if len(files) != 1 or len(request.files) != 1:
             raise Problem("file_input", "Select a single file.")
-        try:
-            expected = int(request.form.get("revision", ""))
-        except ValueError as error:
-            raise Problem("revision", "A project revision is required.") from error
-        artifact = projects.register(project, files[0].stream, files[0].filename, request.form.get("kind"), expected)
+        entry = request.form.get("entry_id")
+        attachment = request.form.get("attachment_id")
+        if attachment and not entry:
+            raise Problem("attachment_owner", "An attachment ID needs a request.")
+        native_entry = projects.entry(project, entry) if entry else None
+        name = native_entry["app"] if native_entry and native_entry["action"] == "native" else None
+        artifact = projects.register(project, files[0].stream, files[0].filename, request.form.get("kind"),
+                                     app=name, version=installer.PINS[name] if name else None,
+                                     entry=entry, attachment_id=attachment)
         return jsonify(artifact_id=artifact), 201
 
     @app.get("/api/projects/<project>/artifacts/<artifact>")
@@ -502,25 +579,47 @@ def create_app(root, book, uv, identity, token, stop, address):
     def gptr(project):
         projects.get(project)
         data = body()
-        mode = data.get("mode")
-        query = question(data)
-        if data.get("public") is not True or mode not in {"deep", "research_report"}:
-            raise Problem("public_confirmation", "Confirm a public question and select a documented report mode.")
-        with lifecycle_lock:
-            with config_lock:
-                _, _, spec = native("gptr")
+        entry_id = data.get("entry_id")
+        entry = projects.entry(project, entry_id) if entry_id else None
+        with lifecycle_lock, config_lock:
+            if entry:
+                if entry["app"] != "gptr" or entry["action"] != "managed":
+                    raise Problem("request_app", "This is not a public report request.", 409)
+                if set(data) != {"entry_id"}:
+                    raise Problem("request_replay", "Only the saved public question may be dispatched.", 409)
+                if entry["operation_id"]:
+                    return jsonify(operation_id=entry["operation_id"]), 202
+                query, mode = entry["question"], entry["mode"]
+            else:
+                query, mode = question(data), data.get("mode")
+                if data.get("public") is not True or mode not in ("deep", "research_report"):
+                    raise Problem("public_confirmation", "Confirm a public question and select a documented report mode.")
+            if jobs.busy("core"):
+                raise Problem("busy", "Wait for core setup to finish.", 409)
+            _, spec, _ = public_route()
             version = book.route("gptr")["upstream_version"]
-            if jobs.busy("core") or book.route("gptr").get("qualification_only"):
-                raise Problem("unverified_route", "Only standalone smoke checks are enabled for this candidate route.", 503)
-            return jsonify(operation_id=jobs.start("gptr", lambda job: runs.public_report(project, query, mode, spec, version, job))), 202
+            operation = jobs.start("gptr", lambda job: runs.public_report(project, query, mode, spec, version, job, entry=entry_id),
+                                   **runs.observe_request(project, entry_id))
+            return jsonify(operation_id=operation), 202
 
     @app.post("/api/projects/<project>/pqa-preview")
     def pqa_preview(project):
         data = body()
-        with lifecycle_lock:
-            if jobs.closing:
-                raise Problem("busy", "The hub is closing.", 409)
-            return jsonify(runs.preview(project, revision(data), data.get("pdfs"), question(data)))
+        entry_id = data.get("entry_id")
+        with lifecycle_lock, config_lock:
+            if jobs.closing or jobs.busy("core"):
+                raise Problem("busy", "Wait for the current hub operation.", 409)
+            ids = data.get("pdfs")
+            if not entry_id:
+                return jsonify(runs.preview(project, ids, question(data)))
+            entry = projects.entry(project, entry_id)
+            if set(data) - {"entry_id", "pdfs"} or entry["app"] != "pqa" or entry["action"] != "managed":
+                raise Problem("request_app", "Only the saved PaperQA2 request can be reviewed.", 409)
+            if entry["state"] == "Awaiting approval" and entry["input_ids"] != ids:
+                raise Problem("request_replay", "Start a new attempt to change the reviewed selection.", 409)
+            if entry["state"] not in ("Preparing", "Awaiting approval"):
+                raise Problem("request_state", "Start a new attempt to review this request.", 409)
+            return jsonify(runs.preview(project, ids, entry["question"], entry=entry_id, quote=entry["quote"]))
 
     @app.post("/api/projects/<project>/pqa-approve")
     def pqa_approve(project):

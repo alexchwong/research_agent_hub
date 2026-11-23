@@ -4,11 +4,12 @@ import hmac
 import json
 import os
 from pathlib import Path
+from importlib import resources
 from secrets import token_hex
 import shlex
 import subprocess
 import sys
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import monotonic, sleep
 from urllib.error import URLError
 from urllib.request import build_opener, ProxyHandler
@@ -16,9 +17,10 @@ import webbrowser
 
 from waitress import create_server
 
-from . import settings
-from .common import Problem, atomic, child, clean_env, data_root, exclusive, prepare_root, read_json, write_json
+from . import settings, setup as provision
+from .common import APPS, Problem, atomic, child, clean_env, data_root, digest, exclusive, prepare_root, read_json, write_json
 from .installer import RouteBook
+from .jobs import Job
 from .openrouter import NoRedirect
 from .web import create_app
 
@@ -49,6 +51,12 @@ def connected(root):
     return None
 
 
+def build_identity():
+    package = resources.files("rah")
+    files = ("cli.py", "web.py", "setup.py", "install_assets/routes.json")
+    return digest(b"".join(package.joinpath(name).read_bytes() for name in files))
+
+
 def serve(root):
     setup = configuration(root)
     book = RouteBook.load(Path(setup["bundle"]) if setup.get("bundle") else None, setup.get("qualification", False))
@@ -62,7 +70,7 @@ def serve(root):
                                max_request_body_size=257 * 1024 * 1024, clear_untrusted_proxy_headers=True)
         address[0] = f"127.0.0.1:{server.effective_port}"
         connection = runtime(root, "connection.json")
-        write_json(connection, {"port": int(server.effective_port), "pid": os.getpid(), "identity": identity, "token": token})
+        write_json(connection, {"port": int(server.effective_port), "pid": os.getpid(), "identity": identity, "token": token, "build": build_identity()})
         runner = Thread(target=server.run, daemon=True)
         runner.start()
         try:
@@ -88,7 +96,11 @@ def open_hub(root, launch_browser=True):
     if not record:
         raise Problem("startup", "The hub did not start. Run rah serve in a terminal for local diagnostics.")
     if launch_browser:
-        if not webbrowser.open(f"http://127.0.0.1:{record['port']}/#{record['token']}"):
+        try:
+            opened = webbrowser.open(f"http://127.0.0.1:{record['port']}/#{record['token']}")
+        except (webbrowser.Error, OSError):
+            opened = False
+        if not opened:
             raise Problem("browser", "The hub started, but a default browser could not be opened.")
     return record
 
@@ -178,14 +190,59 @@ def remove_hub(root, shortcut=True):
     print(root)
 
 
+class SetupProgress(Job):
+    def report(self, name, state, message):
+        super().report(name, state, message)
+        if state != "Queued":
+            print(f"{APPS[name]} · {state}: {message}", flush=True)
+
+
+def setup_core(root, args):
+    previous = configuration(root)
+    uv = args.uv or (Path(previous["uv"]) if previous.get("uv") else None)
+    if not uv or not uv.is_absolute() or not uv.is_file() or not os.access(uv, os.X_OK):
+        raise Problem("uv_missing", "Pass the absolute path of the approved uv executable.")
+    bundle = args.bundle.resolve() if args.bundle else previous.get("bundle")
+    qualification = args.qualification if args.qualification is not None else previous.get("qualification", False)
+    requested = {"uv": str(uv), "bundle": str(bundle) if bundle else None, "qualification": qualification}
+    book = RouteBook.load(Path(bundle) if bundle else None, qualification)
+    print(f"Set up Research Agent Hub, Local Deep Research, GPT Researcher and PaperQA2 in {root}.", flush=True)
+    if running := connected(root):
+        if requested != previous or running.get("build") != build_identity():
+            raise Problem("setup_running", "Quit the running hub before applying the requested setup configuration.")
+        if not all(provision.current(root, book, name) for name in APPS):
+            raise Problem("setup_running", "Open App details in the running hub to retry the missing installation, or quit and rerun rah setup.")
+        complete = True
+        if not args.no_shortcut:
+            register_shortcut(root)
+    else:
+        with exclusive(runtime(root, "instance.lock")):
+            settings.seed(root)
+            write_json(runtime(root, "setup.json"), requested)
+            complete = provision.install_core(root, book, uv, Lock(), SetupProgress("setup", "core"))["complete"]
+            if not args.no_shortcut:
+                register_shortcut(root)
+    try:
+        open_hub(root, not args.no_browser)
+    except Problem as error:
+        if error.code != "browser":
+            if not complete:
+                print("Run rah setup again to retry the affected apps.", file=sys.stderr)
+            raise
+        print("Use the Research Agent Hub shortcut or run rah open to open the workspace.", file=sys.stderr)
+    if not complete:
+        print("Retry the affected app in App details or quit the hub and rerun rah setup.", file=sys.stderr)
+    return 0 if complete else 1
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="rah")
     parser.add_argument("--data-dir", type=Path, default=None)
     commands = parser.add_subparsers(dest="action", required=True)
     setup = commands.add_parser("setup")
-    setup.add_argument("--uv", type=Path, required=True)
+    setup.add_argument("--uv", type=Path)
     setup.add_argument("--bundle", type=Path)
-    setup.add_argument("--qualification", action="store_true")
+    setup.add_argument("--qualification", action="store_true", default=None)
     setup.add_argument("--no-shortcut", action="store_true")
     setup.add_argument("--no-browser", action="store_true")
     commands.add_parser("serve")
@@ -199,16 +256,7 @@ def main(argv=None):
     try:
         root = prepare_root(args.data_dir or data_root())
         if args.action == "setup":
-            if not args.uv.is_absolute() or not args.uv.is_file():
-                raise Problem("uv_missing", "Pass the absolute path of the approved uv executable.")
-            with exclusive(runtime(root, "instance.lock")):
-                RouteBook.load(args.bundle, args.qualification)
-                settings.seed(root)
-                if not args.no_shortcut:
-                    register_shortcut(root)
-                write_json(runtime(root, "setup.json"), {"uv": str(args.uv), "bundle": str(args.bundle.resolve()) if args.bundle else None,
-                                                       "qualification": args.qualification})
-            open_hub(root, not args.no_browser)
+            return setup_core(root, args)
         elif args.action == "open":
             open_hub(root, not args.no_browser)
         elif args.action == "serve":

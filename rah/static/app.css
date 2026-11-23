@@ -36,3 +36,100 @@ dialog [role=alert] { color: #7b361b; }
 .app-grid h2 { font-size: 1.15rem; }
 .primary { background: #215467; color: white; border-color: #215467; }
 summary { cursor: pointer; }
+
+:root {
+  --ink: #16312e;
+  --muted: #526762;
+  --line: #dce6df;
+  --accent: #13584b;
+  --canvas: #f7f9f6;
+  --panel: #eef3ed;
+  color: var(--ink);
+  background: var(--canvas);
+  font-family: "Inter", system-ui, sans-serif;
+}
+body { height: 100dvh; }
+button, .file-button { padding: .44rem .72rem; border-color: #bfd0c7; border-radius: .6rem; color: var(--ink); }
+button:hover, .file-button:hover { background: #e4efe8; color: var(--ink); }
+:focus-visible { outline: 3px solid #18796a; outline-offset: 3px; }
+a { color: #125d53; text-underline-offset: .16em; }
+.primary { background: var(--accent); border-color: var(--accent); color: white; font-weight: 650; }
+.primary:hover { background: #10483e; color: white; }
+.shell { height: 100%; display: grid; grid-template-columns: 15.4rem minmax(0, 1fr); }
+.shell.sidebar-hidden { grid-template-columns: minmax(0, 1fr); }
+.sidebar-hidden #sidebar { display: none; }
+#sidebar { min-height: 0; padding: 1.3rem .85rem .8rem; background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; gap: .65rem; }
+.brand { display: flex; align-items: center; gap: .65rem; line-height: 1.12; font-size: .98rem; letter-spacing: -.02em; padding: 0 .35rem .65rem; }
+.brand-mark { display: grid; place-items: center; font: italic 1.34rem Georgia, serif; width: 2.2rem; height: 2.2rem; border-radius: .75rem; color: #fff; background: var(--accent); }
+.new-chat { display: flex; gap: .5rem; align-items: center; text-align: left; font-weight: 650; background: #fff; min-height: 2.5rem; }
+.sidebar-scroll { overflow-y: auto; flex: 1; min-height: 0; }
+.sidebar-scroll nav { display: block; }
+.sidebar-heading { display: flex; align-items: center; justify-content: space-between; padding: .85rem .35rem .25rem; color: var(--muted); }
+.sidebar-heading h2, .sidebar-scroll nav > p { margin: 0; font-size: .79rem; font-weight: 650; }
+.sidebar-scroll nav > p { padding: .4rem .55rem; font-weight: 450; color: var(--muted); }
+.sidebar-heading button { margin: 0; padding: .15rem .45rem; }
+#projects details { margin: .2rem 0; }
+#projects summary { border-radius: .5rem; padding: .44rem .6rem; font-size: .9rem; font-weight: 650; overflow-wrap: anywhere; }
+#projects details > button { width: calc(100% - 1rem); margin-left: .85rem; text-align: left; }
+.chat-link, #projects details > button, .sidebar-footer button { border: 1px solid transparent; background: transparent; margin: 0; font-size: .86rem; }
+.chat-link { display: block; width: 100%; text-align: left; text-overflow: ellipsis; overflow: hidden; white-space: nowrap; }
+.chat-link:hover, #projects details > button:hover, .sidebar-footer button:hover, #projects summary:hover { background: #e0eae3; }
+.chat-link[aria-current], .sidebar-footer button[aria-current] { background: #d8e9df; font-weight: 700; }
+.sidebar-footer { display: grid; grid-template-columns: 1fr 1fr; padding-top: .55rem; border-top: 1px solid var(--line); gap: .15rem; }
+.sidebar-footer button { text-align: left; }
+main { width: 100%; height: 100%; min-height: 0; margin: 0; padding: 0; max-width: none; display: flex; flex-direction: column; }
+.topbar { flex-wrap: nowrap; padding: .6rem 1.25rem; min-height: 3.7rem; gap: .6rem; background: var(--canvas); color: var(--ink); border-bottom: 1px solid var(--line); }
+.topbar button { color: var(--ink); background: #fff; border-color: var(--line); }
+.topbar button:hover { background: #e4efe8; }
+#sidebar-toggle { padding: .35rem .65rem; }
+#breadcrumbs { flex: 1; min-width: 0; display: flex; gap: .35rem; align-items: center; color: var(--muted); white-space: nowrap; }
+#breadcrumbs strong { overflow: hidden; text-overflow: ellipsis; font-size: .92rem; }
+#breadcrumbs button { background: transparent; border: none; margin: 0; padding: .25rem; }
+#project-tools { display: flex; align-items: center; gap: .15rem; flex-wrap: wrap; }
+#project-tools button { margin: 0; font-size: .8rem; }
+#message { margin: 0; min-height: 0; }
+#message:not(:empty) { margin: .5rem 1.25rem 0; border: 1px solid #efdac6; border-radius: .6rem; background: #fff6ec; padding: .55rem .8rem; }
+#view { flex: 1; min-height: 0; min-width: 0; }
+.connection { max-width: 44rem; padding: 2rem; margin: 5vh auto; }
+#view.secondary { overflow: auto; padding: 1.5rem clamp(1rem, 6vw, 4rem) 3rem; }
+.secondary > * { max-width: 62rem; }
+#view.workspace { display: flex; flex-direction: column; }
+.transcript { flex: 1; overflow: auto; scrollbar-gutter: stable; padding: .85rem max(1rem, calc((100% - 49rem) / 2)) .5rem; }
+.welcome { text-align: center; margin: clamp(2rem, 17vh, 10rem) auto 1rem; }
+.welcome h1 { font: 500 clamp(1.9rem, 4vw, 3.3rem)/1.12 Georgia, serif; letter-spacing: -.045em; margin-bottom: .55rem; }
+.welcome p, .composer-footer p, .turn-meta { color: var(--muted); }
+.composer { background: #fff; border: 1px solid #ccdcd1; border-radius: 1.05rem; box-shadow: 0 .35rem 1.6rem #133d2310; padding: .65rem .8rem; width: min(calc(100% - 2rem), 49rem); margin: .6rem auto .9rem; }
+.composer-tools, .sub-actions, .chips, .composer-footer, .dialog-actions, .turn-meta { display: flex; gap: .38rem .6rem; align-items: center; flex-wrap: wrap; }
+.composer-tools label { font-size: .75rem; color: var(--muted); font-weight: 650; }
+.composer-tools select { margin: .18rem 0 .15rem; padding: .3rem .45rem; color: var(--ink); border-color: var(--line); border-radius: .5rem; background: var(--canvas); }
+.composer .question { width: 100%; max-width: none; margin: .35rem 0; padding: .5rem; border: 1px solid transparent; border-radius: .5rem; min-height: 3rem; max-height: 24vh; resize: vertical; }
+.composer .question::placeholder { color: #60756c; }
+.composer-footer p { font-size: .82rem; flex: 1; margin: .3rem 0; min-width: min(11rem, 100%); }
+.composer-footer button, .sub-actions button, .chips button { margin: 0; font-size: .85rem; }
+.chips:not(:empty) { margin: .2rem 0 .45rem; }
+.chips button { max-width: 19rem; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.file-button { cursor: pointer; display: inline-flex; position: relative; width: fit-content; border: 1px solid #bfd0c7; background: #fff; font-size: .85rem; }
+.file-button:focus-within { outline: 3px solid #18796a; outline-offset: 3px; }
+.file-button input { opacity: 0; position: absolute; inset: 0; margin: 0; padding: 0; height: 100%; cursor: pointer; }
+.turn { padding: .9rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.turn-meta { font-size: .8rem; }
+.turn-meta span { padding: .13rem .48rem; border-radius: .8rem; background: #e8eee8; }
+.turn-meta span[data-state="Running"], .turn-meta span[data-state="Awaiting approval"] { background: #e4edf3; color: #1c4a67; }
+.turn-meta span[data-state="Failed"], .turn-meta span[data-state="Interrupted"] { background: #f3e8dd; color: #733b20; }
+.prompt { padding: .7rem .95rem; border-radius: .9rem .9rem .2rem .9rem; background: #e6f0ea; width: fit-content; max-width: 90%; margin: .65rem 0 .65rem auto; white-space: pre-wrap; }
+.native-result { margin-top: .7rem; }
+.result-text { font: inherit; line-height: 1.62; margin: .45rem 0; background: #fff; border: 1px solid var(--line); border-radius: .65rem; padding: .9rem; }
+dialog { border-color: var(--line); border-radius: 1rem; }
+dialog::backdrop { background: #12282591; }
+dialog blockquote, .turn blockquote, .chips blockquote { margin: .65rem 0; padding: .5rem .8rem; border-left: .18rem solid #92b4a1; white-space: pre-wrap; overflow-wrap: anywhere; }
+.dialog-actions { justify-content: flex-end; margin-top: 1rem; }
+[hidden] { display: none !important; }
+@media (max-width: 720px) {
+  .shell { grid-template-columns: minmax(0, 1fr); }
+  #sidebar { position: absolute; inset: 3.65rem auto 0 0; z-index: 5; width: min(84vw, 16rem); box-shadow: .45rem .2rem 1.6rem #102b2328; }
+  .topbar { padding: .45rem .65rem; min-height: 3.65rem; }
+  #project-tools button { padding: .3rem .37rem; font-size: .73rem; }
+  #breadcrumbs button, #breadcrumbs > span { display: none; }
+  .composer { width: calc(100% - 1rem); }
+  .welcome { margin-top: 10vh; }
+}
