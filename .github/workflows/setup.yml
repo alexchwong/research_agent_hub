@@ -30,6 +30,8 @@ jobs:
           "$uv" pip sync --python "$bin/python" --require-hashes --only-binary=:all: dev-deps.lock
           "$bin/python" -m pytest -q -m 'not live'
           node --check rah/static/app.js
+          node --check rah/static/workspace.js
+          node --check rah/static/native_handoff.js
       - name: Build and bootstrap the wheel into a fresh environment
         shell: bash
         run: |

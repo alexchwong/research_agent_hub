@@ -178,7 +178,7 @@ async function apps() {
         }));
       }), install);
       const running = element("div");
-      (app.id === "pqa" ? advanced : card).append(button(app.id === "pqa" ? "Show standalone command" : app.id === "ldr" ? "Open LDR" : "Open GPT Researcher", async () => {
+      async function openNative() {
         running.replaceChildren();
         const stop = button("Stop native app", async () => {
           await api("/apps/" + app.id + "/stop", {});
@@ -204,10 +204,21 @@ async function apps() {
           if (opened.url) running.append(external("Open " + app.name, opened.url));
           if (opened.restart_needed) running.append(button("Restart to apply settings", async () => {
             await api("/apps/" + app.id + "/stop", {});
-            say("Once the app stops, use its Open button to start it with the saved settings.");
+            state.textContent = "Stopping";
+            for (let attempt = 0; attempt < 40 && running.isConnected; attempt++) {
+              await new Promise(resolve => setTimeout(resolve, 500));
+              const status = await api("/apps/" + app.id + "/browser");
+              if (status.state === "Stopped" || status.state === "Exited") {
+                if (running.isConnected) await openNative();
+                return;
+              }
+            }
+            if (running.isConnected) say("The native app is still stopping. Open it again once it has stopped.");
           }));
         }
-      }), running);
+      }
+      (app.id === "pqa" ? advanced : card).append(button(app.id === "pqa" ? "Show standalone command" : app.id === "ldr" ? "Open LDR" :
+        app.service?.state === "Ready" ? "Reopen GPT Researcher" : "Open GPT Researcher", openNative), running);
       if (app.can_stop) card.append(button("Stop running app", async () => {
         await api("/apps/" + app.id + "/stop", {});
         await apps();
@@ -252,10 +263,65 @@ const credentialLabels = {
 };
 
 async function settings() {
-  const info = await api("/settings");
+  const [info, storage, trashed] = await Promise.all([api("/settings"), api("/workspace/storage"), api("/chats/trash")]);
   if (screen !== "settings") return;
   view.replaceChildren(element("h1", "Settings"));
   const managed = section(view, "OpenRouter");
+  managed.append(element("p", "With a saved key, unconfigured GPT Researcher and Local Deep Research roles use the defaults below. The reviewed PaperQA2 profile stays separate."));
+  const search = section(view, "Search sources", "The default literature searches need no separate search key. Search still sends queries to the selected service; model calls use your existing model settings.");
+  search.append(element("p", "PaperQA2 searches the PDFs you select. It does not need an external search key."));
+  const searchFields = {gptr: ["GPT Researcher", "RAH_NATIVE_GPTR__RETRIEVER", "RAH_NATIVE_GPTR__SEARX_URL"],
+    ldr: ["Local Deep Research", "RAH_NATIVE_LDR__LDR_SEARCH_TOOL", "RAH_NATIVE_LDR__LDR_SEARCH_ENGINE_WEB_SEARXNG_DEFAULT_PARAMS_INSTANCE_URL"]};
+  const searchInputs = {};
+  for (const [app, [label, sourceKey, urlKey]] of Object.entries(searchFields)) {
+    const source = control(search, label + " search source");
+    source.placeholder = info.search_defaults[app];
+    source.setAttribute("list", "search-presets-" + app);
+    const list = element("datalist");
+    list.id = "search-presets-" + app;
+    for (const [value, name] of Object.entries({...info.search_presets[app], native: "Use the app’s own settings"})) {
+      const option = element("option");
+      option.value = value;
+      option.label = name;
+      list.append(option);
+    }
+    search.append(list, element("p", "Effective selection: " + (info.states[app].search || "See app settings")));
+    const url = control(search, label + " SearXNG base URL");
+    url.placeholder = "http://127.0.0.1:8888";
+    searchInputs[sourceKey] = source;
+    searchInputs[urlKey] = url;
+    search.append(button("Test SearXNG for " + label, async () => {
+      const result = await api("/search/searx/test", {url: url.value.trim()});
+      say("SearXNG returned " + result.results + " usable results for the public test query.");
+    }));
+  }
+  const folders = section(view, "Workspace storage", "Only project and chat files and Trash move. Credentials, the database, and app installations stay in RAH’s data directory.");
+  folders.append(element("p", storage.path), button("Copy path", () => navigator.clipboard.writeText(storage.path)));
+  const workspacePath = control(folders, "Workspace folder (absolute path)");
+  workspacePath.value = storage.path;
+  folders.append(button("Use default path", () => { workspacePath.value = storage.default; }),
+    button("Choose workspace folder…", async () => {
+      const result = await api("/workspace/storage/choose", {});
+      if (result.path) workspacePath.value = result.path;
+    }), button("Migrate workspace…", async () => {
+      if (workspacePath.value === storage.path) return;
+      const {dialog, act, show} = modal("Migrate workspace?");
+      dialog.append(element("p", "RAH will copy files to the new location and switch to it after the copy succeeds. The previous files are kept as a backup."),
+        element("pre", workspacePath.value));
+      show(act("Cancel", () => dialog.close()), act("Copy files and switch", async () => {
+        const migrated = await api("/workspace/storage", {path: workspacePath.value, confirm: true});
+        dialog.close();
+        await settings();
+        say(migrated.backup ? "Workspace location updated. Previous files: " + migrated.backup +
+          (migrated.backup_split ? " and " + migrated.previous : "") : "Workspace location updated.");
+      }, true));
+    }));
+  const trash = section(view, "Chat Trash", trashed.length ? "Restore a chat and its files to the workspace." : "No deleted chats.");
+  for (const chat of trashed) {
+    const row = element("p", chat.title + " ");
+    row.append(button("Restore", async () => { await api("/chats/" + chat.id + "/restore", {}); await settings(); }));
+    trash.append(row);
+  }
   const advanced = element("details");
   advanced.className = "settings-credentials";
   advanced.append(element("summary", "Advanced"), element("p", "Blank roles inherit a shared model when configured. Enter native to use the app’s own settings."));
@@ -268,7 +334,9 @@ async function settings() {
   const changes = {};
   const cleared = {};
   for (const [key, value] of Object.entries(info.values)) {
-    const input = control(modelLabels[key] ? advanced : nativeDetails, modelLabels[key] || key);
+    const shared = ["RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL"].includes(key);
+    const input = searchInputs[key] || control(shared ? managed : modelLabels[key] ? advanced : nativeDetails, modelLabels[key] || key);
+    input.dataset.key = key;
     input.value = value;
     changes[key] = input;
   }
@@ -277,11 +345,18 @@ async function settings() {
     const roleModels = element("datalist");
     defaults.id = "openrouter-default-" + family;
     roleModels.id = "openrouter-roles-" + family;
-    changes["RAH_OPENROUTER_" + family.toUpperCase() + "_MODEL"].setAttribute("list", defaults.id);
+    const shared = changes["RAH_OPENROUTER_" + family.toUpperCase() + "_MODEL"];
+    shared.setAttribute("list", defaults.id);
+    shared.placeholder = info.model_defaults[family];
+    shared.autocomplete = "off";
+    const suggestion = element("option");
+    suggestion.value = info.model_defaults[family];
+    defaults.append(suggestion);
     const roles = family === "chat" ? ["LDR_CHAT", "GPTR_FAST", "GPTR_SMART", "GPTR_STRATEGIC",
       "PQA_ANSWER", "PQA_SUMMARY", "PQA_AGENT"] : ["GPTR_EMBEDDING", "PQA_EMBEDDING"];
     for (const role of roles) changes["RAH_" + role].setAttribute("list", roleModels.id);
-    advanced.append(button("Browse OpenRouter " + family + " models", async () => {
+    let loading;
+    async function loadModels() {
       const catalog = await api("/models/" + family + "?details=1");
       const models = catalog.models;
       say(catalog.stale ? "Showing saved or release model suggestions. Live data is unavailable." :
@@ -299,9 +374,13 @@ async function settings() {
           return option;
         }));
       }
-    }), defaults, roleModels);
+    }
+    const populate = () => loading ||= loadModels().catch(error => { loading = null; say(error.message); });
+    shared.addEventListener("focus", populate, {once: true});
+    for (const role of roles) changes["RAH_" + role].addEventListener("focus", populate, {once: true});
+    managed.append(button("Load OpenRouter " + family + " models", populate), defaults, roleModels);
   }
-  managed.append(button("Use recommended settings", () => {
+  managed.append(button("Use recommended PaperQA2 settings", () => {
     const list = element("ul");
     for (const [key, value] of Object.entries(info.paper_suggestions)) {
       const old = changes[key].value;
@@ -392,13 +471,16 @@ async function download(project, item, bib = false) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-async function showProject(id, answerId, panel) {
-  const project = await api("/projects/" + id);
+async function showProject(id, answerId, panel, chat) {
+  const query = chat && panel === "files" ? "?chat=" + chat : "";
+  const project = await api("/projects/" + id + query);
   if (panel !== screen) return;
   const path = "/projects/" + id;
   const pdfs = project.artifact.filter(item => item.kind === "pdf");
   view.replaceChildren(element("h1", panel === "papers" ? "Papers Needed" : "Files"));
-  if (panel !== "papers") view.append(button("Open project folder", async () => { await api(path + "/open-folder", {}); }));
+  if (panel !== "papers") view.append(element("p", project.folder),
+    button("Open folder", () => api(path + "/open-folder", {chat_id: chat})),
+    button("Copy path", () => navigator.clipboard.writeText(project.folder)));
   if (answerId) {
     const response = await api(path + "/artifacts/" + answerId, undefined, true);
     section(view, "PaperQA2 answer and native references").append(element("pre", await response.text()));
@@ -413,11 +495,28 @@ async function showProject(id, answerId, panel) {
       }));
     } else {
       row.append(button("Download", () => download(project, item)));
-      if (item.kind === "answer") row.append(button("View answer and references", () => showProject(id, item.id, panel)));
+      if (item.kind === "answer") row.append(button("View answer and references", () => showProject(id, item.id, panel, chat)));
       if (item.kind === "answer" && item.has_bib) {
         row.append(button("Download native citations", () => download(project, item, true)));
       }
     }
+    files.append(row);
+  }
+  for (const output of project.native_outputs || []) {
+    const row = element("p", output.name + " ");
+    row.append(button("Download Classic output", async () => {
+      const response = await api(path + "/native-output/" + encodeURIComponent(output.name) + query, undefined, true);
+      const url = URL.createObjectURL(await response.blob());
+      const link = element("a");
+      link.href = url;
+      link.download = output.name;
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }));
+    if (/\.(md|txt|json|pdf)$/i.test(output.name)) row.append(button("Add to saved files", async () => {
+      await api(path + "/native-output/import", {name: output.name, chat_id: chat});
+      await showProject(id, undefined, panel, chat);
+    }));
     files.append(row);
   }
   const reports = project.artifact.filter(item => ["report", "answer"].includes(item.kind) && !item.original_name.toLowerCase().endsWith(".ris"));
@@ -447,10 +546,10 @@ async function showProject(id, answerId, panel) {
     if (!file) throw new Error("Select a file first.");
     const form = new FormData();
     form.set("file", file);
-    form.set("revision", project.revision);
+    if (chat) form.set("chat_id", chat);
     form.set("kind", file.name.toLowerCase().endsWith(".pdf") ? "pdf" : "report");
     await api(path + "/files", form);
-    await showProject(id, undefined, panel);
+    await showProject(id, undefined, panel, chat);
   }));
   if (panel === "files") return;
   view.replaceChildren(element("h1", "Papers Needed"));

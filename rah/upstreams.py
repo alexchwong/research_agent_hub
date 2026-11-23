@@ -26,17 +26,26 @@ def current(root, app, book):
     return location[1]
 
 
-def launch_spec(root, app, install, profile, *, browser=False, identity=""):
+def launch_spec(root, app, install, profile, *, browser=False, identity="", workspace=None, hub_origin=""):
     native = private_directory(child(root, "apps", app, "native"))
     env = clean_env() | profile["env"]
+    if browser and hub_origin:
+        env["RAH_HANDOFF_HUB"] = hub_origin
     venv = install / "venv"
     if app == "ldr":
         env.update(LDR_WEB_HOST="127.0.0.1", LDR_WEB_PORT=str(LDR_PORT), LDR_WEB_USE_HTTPS="false",
                    LDR_DATA_DIR=str(native))
-        return LaunchSpec([executable(venv, "ldr-web")], native, env, f"http://127.0.0.1:{LDR_PORT}/")
+        if browser:
+            env["RAH_LDR_STARTUP_TOKEN"] = identity
+        command = [venv_python(venv), install / "ldr_browser.py"] if browser else [executable(venv, "ldr-web")]
+        return LaunchSpec(command, native, env, f"http://127.0.0.1:{LDR_PORT}/")
     if app == "gptr":
         if browser:
             env["RAH_GPTR_STARTUP_TOKEN"] = identity
+            if workspace:
+                native = private_directory(child(workspace, "gptr"))
+                private_directory(child(native, "outputs"))
+                env["DOC_PATH"] = str(child(native, "my-docs"))
             return LaunchSpec([venv_python(venv), install / "gptr_browser.py", install / "source", str(GPTR_PORT)],
                               native, env, f"http://127.0.0.1:{GPTR_PORT}/")
         return LaunchSpec([venv_python(venv), install / "source/cli.py"], native, env)
@@ -57,6 +66,13 @@ def write_standalone(root, app):
 
 
 def prepare_launch(root, app, install):
-    if app == "gptr":
-        atomic(install / "gptr_browser.py", resources.files("rah").joinpath("gptr_browser.py").read_bytes())
+    if app in {"gptr", "ldr"}:
+        refresh_browser(app, install)
     return write_standalone(root, app)
+
+
+def refresh_browser(app, install):
+    names = ("gptr_browser.py", "native_handoff.py", "native_handoff.js")
+    for name in (*names, "ldr_browser.py") if app == "ldr" else names:
+        resource = resources.files("rah").joinpath("static", name) if name.endswith(".js") else resources.files("rah").joinpath(name)
+        atomic(child(install, name), resource.read_bytes())

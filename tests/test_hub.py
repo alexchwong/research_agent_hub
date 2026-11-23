@@ -30,7 +30,7 @@ class HubTest(unittest.TestCase):
         self.assertEqual(resolved["env"]["LDR_LLM_MODEL"], "vendor/model:variant")
         self.assertEqual(resolved["env"]["LDR_LLM_OPENROUTER_API_KEY"], "example")
         explicit_native = settings.parse(config.text + "RAH_LDR_CHAT=native\n")
-        self.assertEqual(settings.resolve(explicit_native, "ldr", roles)["env"], {})
+        self.assertEqual(settings.resolve(explicit_native, "ldr", roles)["env"], {"LDR_SEARCH_TOOL": "pubmed"})
         self.assertEqual(settings.resolve(config, "pqa", [])["env"], {})
         with self.assertRaises(Problem):
             settings.resolve(settings.parse(config.text + "RAH_LDR_CHAT=openrouter\n"), "ldr", roles)
@@ -143,7 +143,7 @@ class HubTest(unittest.TestCase):
         self.assertEqual({item["provider"] for item in preview["profile"]["destinations"]},
                          {"Azure"})
 
-        def verify(folder, interpreter, env, payload, record):
+        def verify(folder, interpreter, env, payload, record, *, job):
             self.assertEqual(interpreter, python)
             self.assertEqual(env["OPENROUTER_API_KEY"], "synthetic")
             self.assertNotIn("OPENAI_API_KEY", env)
@@ -160,12 +160,14 @@ class HubTest(unittest.TestCase):
     def test_embedding_catalogue_is_cached_separately(self):
         provider = OpenRouter(lambda: None)
 
-        def fetch(path, _key):
-            if path == "embeddings/models":
-                return [{"id": "fixture/embed"}]
-            return [{"id": "fixture/chat", "architecture": {"output_modalities": ["text"]}}]
+        def fetch(call, _headers):
+            if call.url == "https://openrouter.ai/api/v1/embeddings/models":
+                return {"data": [{"id": "fixture/embed"}]}
+            self.assertEqual(call.url, "https://openrouter.ai/api/v1/models")
+            return {"data": [{"id": "fixture/chat", "architecture": {"output_modalities": ["text"]}},
+                             {"id": "fixture/image", "architecture": {"output_modalities": ["image"]}}]}
 
-        with patch("rah.openrouter.request_json", side_effect=fetch) as request:
+        with patch("modelspell._http.get_json", side_effect=fetch) as request:
             self.assertEqual(provider.models("chat"), ["fixture/chat"])
             self.assertEqual(provider.models("embedding"), ["fixture/embed"])
             self.assertEqual(provider.models("chat"), ["fixture/chat"])

@@ -6,6 +6,7 @@ import os
 
 from dotenv.parser import parse_stream
 
+from . import search_sources
 from .common import APPS, Problem, atomic, canonical, child, digest, private_directory, read_json, write_json
 
 
@@ -20,14 +21,18 @@ PAPER_MODELS = {role: entry["model"] for role, entry in json.loads(
 )["paper_profiles"][PAPER_PROFILE]["roles"].items()}
 PAPER_SUGGESTIONS = {f"RAH_PQA_{role.upper()}": f"openrouter:{model}"
                      for role, model in PAPER_MODELS.items()}
+DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
+DEFAULT_EMBEDDING_MODEL = PAPER_MODELS["embedding"]
+GPTR_PROFILE_VERSION = 4
+PROFILE_VERSIONS = {"gptr": GPTR_PROFILE_VERSION, "ldr": 3}
 COMMON = {"RAH_OPENROUTER_API_KEY", "RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL", "RAH_PQA_SETTINGS_FILE"}
 NATIVE = {
     "ldr": {
         "LDR_SEARCH_TOOL", "LDR_SEARCH_ENGINE_WEB_OPENALEX_API_KEY", "LDR_SEARCH_ENGINE_WEB_BRAVE_API_KEY",
-        "LDR_SEARCH_ENGINE_WEB_PUBMED_API_KEY", "LDR_LLM_PROVIDER", "LDR_LLM_MODEL",
+        "LDR_SEARCH_ENGINE_WEB_PUBMED_API_KEY", search_sources.URL_FIELDS["ldr"], "LDR_LLM_PROVIDER", "LDR_LLM_MODEL",
         "LDR_LLM_OPENAI_API_KEY", "LDR_LLM_ANTHROPIC_API_KEY", "LDR_LLM_LMSTUDIO_URL",
     },
-    "gptr": {"TAVILY_API_KEY", "RETRIEVER", "CONTEXT_FILTER", "EMBEDDING", "OPENAI_API_KEY", "CONFIG_PATH",
+    "gptr": {"TAVILY_API_KEY", "RETRIEVER", "SEARX_URL", "CONTEXT_FILTER", "EMBEDDING", "OPENAI_API_KEY", "CONFIG_PATH",
              "FAST_LLM", "SMART_LLM", "STRATEGIC_LLM", "LLM_PROVIDER", "FAST_LLM_MODEL", "SMART_LLM_MODEL",
              "OPENAI_BASE_URL", "OLLAMA_BASE_URL"},
     "pqa": {"OPENAI_API_KEY", "CROSSREF_API_KEY", "SEMANTIC_SCHOLAR_API_KEY", "ANTHROPIC_API_KEY"},
@@ -82,13 +87,16 @@ def seed(root):
         pass
 
 
-def checked_projection(root, app, config, *, effective=None):
+def checked_projection(root, app, config, *, effective=None, upgrade=None):
     try:
         stored = applied(root, app)
         if isinstance(stored, dict):
             checksum = stored.pop("checksum", None)
             if checksum == digest(canonical(stored)):
-                if effective is None and stored.get("revision") == config.revision:
+                same_revision = stored.get("revision") == config.revision
+                if same_revision and upgrade and stored.get("version") in range(1, PROFILE_VERSIONS.get(app, 1)):
+                    return install_projection(root, app, upgrade())
+                if effective is None and same_revision:
                     return stored
                 if effective is not None and all(stored.get(key) == effective[key] for key in ("models", "env", "args", "native_file")):
                     return stored
@@ -104,7 +112,18 @@ def resolve(config, app, capabilities):
         if values.get(key := f"RAH_NATIVE_{app.upper()}__{name}")
     }
     options = {}
+    if app == "gptr" and values.get("RAH_OPENROUTER_API_KEY"):
+        options["OPENROUTER_API_KEY"] = values["RAH_OPENROUTER_API_KEY"]
     states = {}
+    if field := search_sources.FIELDS.get(app):
+        selection = environment.get(field, "").strip()
+        if selection == "native":
+            environment.pop(field)
+        elif not selection and not (app == "gptr" and environment.get("CONFIG_PATH")):
+            selection = options[field] = search_sources.DEFAULTS[app]
+        elif selection:
+            environment[field] = selection
+        states["search"] = search_sources.LABELS[app].get(selection, "Native settings" if selection in {"", "native"} else selection)
     managed = set()
     models = {}
     for role, native_name in ROLES[app].items():
@@ -112,28 +131,34 @@ def resolve(config, app, capabilities):
         value = values.get(f"RAH_{label}", "")
         default_key = "RAH_OPENROUTER_EMBEDDING_MODEL" if role == "EMBEDDING" else "RAH_OPENROUTER_CHAT_MODEL"
         inherited = not value and f"{label}:openrouter" in capabilities and values.get(default_key)
-        if inherited:
-            value = "openrouter:" + values[default_key]
+        automatic = not value and not inherited and f"{label}:openrouter" in capabilities and values.get("RAH_OPENROUTER_API_KEY") and (
+            app == "gptr" and not ({native_name} | LEGACY_GPTR) & environment.keys()
+            or app == "ldr" and not {"LDR_LLM_PROVIDER", "LDR_LLM_MODEL", "LDR_LLM_OPENAI_API_KEY", "LDR_LLM_ANTHROPIC_API_KEY"} & environment.keys()
+        )
+        if inherited or automatic:
+            value = "openrouter:" + (values[default_key] if inherited else DEFAULT_EMBEDDING_MODEL if role == "EMBEDDING" else DEFAULT_CHAT_MODEL)
         if not value or value == "native":
             states[label] = "Native settings"
             continue
         provider, sep, model = value.partition(":")
         if not sep or not model or any(char.isspace() for char in model) or f"{label}:{provider}" not in capabilities:
             raise Problem("unsupported_model", f"{label} has an unsupported model mapping.")
+        if role == "EMBEDDING" and provider == "openrouter" and model.split(":", 1)[0] == DEFAULT_CHAT_MODEL:
+            raise Problem("unsupported_model", "DeepSeek Flash is a chat model. Choose a separate OpenRouter embedding model.", 409)
         if provider == "openrouter" and not values.get("RAH_OPENROUTER_API_KEY"):
             raise Problem("needs_credential", f"{label} needs an OpenRouter key.", 409)
         if provider == "openai" and not environment.get("OPENAI_API_KEY"):
             raise Problem("needs_credential", f"{label} needs a standalone OpenAI key.", 409)
         managed.add(native_name)
         models[role.lower()] = {"provider": provider, "model": model}
-        states[label] = "Shared OpenRouter default" if inherited else "Saved for next launch"
+        states[label] = (f"Built-in OpenRouter default: {model}" if automatic else
+                         "Shared OpenRouter default" if inherited else "Saved for next launch")
         if app == "ldr" and provider == "openrouter":
             managed.update({"LDR_LLM_PROVIDER", "LDR_LLM_OPENROUTER_API_KEY"})
             options.update(LDR_LLM_PROVIDER="openrouter", LDR_LLM_MODEL=model,
                            LDR_LLM_OPENROUTER_API_KEY=values["RAH_OPENROUTER_API_KEY"])
         elif app == "gptr" and provider == "openrouter":
             options[native_name] = value
-            options["OPENROUTER_API_KEY"] = values["RAH_OPENROUTER_API_KEY"]
         elif app == "pqa":
             options[native_name] = f"{provider}/{model}"
             if provider == "openrouter":
@@ -197,7 +222,8 @@ def install_projection(root, app, projection, overwrite=False):
         edited = True
     if edited and not overwrite:
         raise Problem("edited_projection", f"{APPS[app]} generated settings were manually edited.", 409)
-    body = {"version": 1, "notice": "RAH-generated settings. Edit the RAH .env or native configuration.", **projection}
+    body = {"version": PROFILE_VERSIONS.get(app, 1),
+            "notice": "RAH-generated settings. Edit the RAH .env or native configuration.", **projection}
     signed = body | {"checksum": digest(canonical(body))}
     write_json(path, signed)
     return signed
@@ -221,6 +247,9 @@ def public_config(root, config, capabilities):
     return {
         "revision": config.revision,
         "paper_suggestions": PAPER_SUGGESTIONS,
+        "model_defaults": {"chat": DEFAULT_CHAT_MODEL, "embedding": DEFAULT_EMBEDDING_MODEL},
+        "search_defaults": search_sources.DEFAULTS,
+        "search_presets": search_sources.LABELS,
         "values": {key: config.values.get(key, "") for key in sorted(KEYS) if not secret(key)},
         "credentials": {key: bool(config.values.get(key)) for key in sorted(KEYS) if secret(key)},
         "states": states,

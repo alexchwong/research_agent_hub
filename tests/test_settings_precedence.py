@@ -33,11 +33,28 @@ def test_role_defaults_override_and_release_coexist():
         "STRATEGIC_LLM": "native-provider:test/strategy",
         "EMBEDDING": "openrouter:test/embed",
         "TAVILY_API_KEY": "synthetic-search-key",
+        "RETRIEVER": "pubmed_central",
         "OPENROUTER_API_KEY": "synthetic-shared-key",
     }
     assert profile["states"]["GPTR_FAST"] == "Shared OpenRouter default"
     assert profile["states"]["GPTR_SMART"] == "Saved for next launch"
     assert profile["states"]["GPTR_STRATEGIC"] == "Native settings"
+
+
+def test_key_only_selects_openrouter_for_unconfigured_text_and_vector_roles():
+    key = {"RAH_OPENROUTER_API_KEY": "synthetic-shared-key"}
+    gptr = resolve("gptr", key | {"RAH_NATIVE_GPTR__OPENAI_API_KEY": "old-openai-key"})
+    assert gptr["env"] | {} == {
+        "OPENAI_API_KEY": "old-openai-key",
+        "RETRIEVER": "pubmed_central",
+        "OPENROUTER_API_KEY": "synthetic-shared-key",
+        **dict.fromkeys(("FAST_LLM", "SMART_LLM", "STRATEGIC_LLM"), "openrouter:deepseek/deepseek-v4.1-flash-1017"),
+        "EMBEDDING": "openrouter:openai/text-embedding-3-small",
+    }
+    assert resolve("ldr", key)["env"]["LDR_LLM_MODEL"] == "deepseek/deepseek-v4.1-flash-1017"
+    assert not resolve("pqa", key)["models"]
+    with pytest.raises(Problem, match="chat model"):
+        resolve("gptr", key | {"RAH_OPENROUTER_EMBEDDING_MODEL": "deepseek/deepseek-v4.1-flash-1017"})
 
 
 @pytest.mark.parametrize("app,extra,code", [

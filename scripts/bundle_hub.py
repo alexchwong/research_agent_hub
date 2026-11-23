@@ -5,33 +5,68 @@ from pathlib import Path
 import platform
 import shutil
 import subprocess
+from tempfile import TemporaryDirectory
 import zipfile
 import sys
 
 REPO = Path(__file__).resolve().parents[1]
 
 
-def run(*args):
-    subprocess.run(args, cwd=REPO, check=True)
+def run(*args, cwd=None):
+    subprocess.run(args, cwd=REPO if cwd is None else cwd, check=True)
 
 
 def python_in(venv):
     return venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
 
 
+def build_wheel(uv, wheelhouse):
+    # Setuptools can reuse newer files under build/lib, even after a checkout changes.
+    # Copy only the build inputs and keep working-tree edits (including new package files).
+    with TemporaryDirectory(prefix="source-", dir=wheelhouse.parent) as directory:
+        source = Path(directory)
+        for name in ("pyproject.toml", "README.md", "LICENSE"):
+            shutil.copyfile(REPO / name, source / name)
+        package = source / "rah"
+        shutil.copytree(REPO / "rah", package,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.py[co]", ".DS_Store"))
+        expected = {path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).digest()
+                    for path in package.rglob("*") if path.is_file()}
+
+        run(uv, "build", "--wheel", "--out-dir", wheelhouse, cwd=source)
+        wheels = list(wheelhouse.glob("research_agent_hub-*.whl"))
+        if len(wheels) != 1:
+            raise ValueError("Expected exactly one RAH release wheel")
+        with zipfile.ZipFile(wheels[0]) as wheel:
+            files = [entry for entry in wheel.infolist() if entry.filename.startswith("rah/") and not entry.is_dir()]
+            actual = {entry.filename: hashlib.sha256(wheel.read(entry)).digest() for entry in files}
+        missing = expected.keys() - actual.keys()
+        extra = actual.keys() - expected.keys()
+        changed = {name for name in expected.keys() & actual.keys() if expected[name] != actual[name]}
+        if missing or extra or changed or len(files) != len(actual):
+            raise ValueError(f"Wheel differs from staged RAH source: missing={sorted(missing)}, "
+                             f"extra={sorted(extra)}, changed={sorted(changed)}, "
+                             f"duplicate entries={len(files) - len(actual)}")
+        return wheels[0]
+
+
 def bundle(uv, target):
     target.mkdir(parents=True, exist_ok=False)
     wheelhouse = target / "wheelhouse"
     wheelhouse.mkdir()
-    run(uv, "build", "--wheel", "--out-dir", wheelhouse)
-    wheels = list(wheelhouse.glob("research_agent_hub-*.whl"))
-    if len(wheels) != 1:
-        raise ValueError("Expected exactly one RAH release wheel")
+    wheel = build_wheel(uv, wheelhouse)
     lock = REPO / "hub-deps.lock"
     run(sys.executable, "-m", "pip", "download", "--disable-pip-version-check",
         "--only-binary=:all:", "--require-hashes", "--dest", wheelhouse, "-r", lock)
-    hub_hash = hashlib.sha256(wheels[0].read_bytes()).hexdigest()
+    hub_hash = hashlib.sha256(wheel.read_bytes()).hexdigest()
     lines = lock.read_text(encoding="utf-8").splitlines()
+    # The source lock downloads the pinned release from GitHub; the installed
+    # lock must use the verified copy in the wheelhouse without network access.
+    for i, line in enumerate(lines):
+        if line.startswith("modelspell @ "):
+            artifact, checksum = line.removeprefix("modelspell @ ").split()
+            version = artifact.rsplit("/", 1)[1].split("-")[1]
+            lines[i] = f"modelspell=={version} {checksum}"
     lines.append("research-agent-hub==0.1.0 --hash=sha256:" + hub_hash)
     (target / "hub.lock").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (target / "python-version.txt").write_text(platform.python_version() + "\n", encoding="utf-8")

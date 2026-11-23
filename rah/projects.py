@@ -1,15 +1,18 @@
 import json
+import os
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from importlib import resources
-from pathlib import PurePath
+from pathlib import Path, PurePath
 import re
+import shutil
 import sqlite3
+import stat
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
 from uuid import uuid4
 
-from .common import Problem, atomic, child, file_digest, id_value, private_directory
+from .common import Problem, atomic, child, file_digest, id_value, is_link, private_directory, verify_windows_root
 
 
 REPORT_LIMIT = 32 * 1024 * 1024
@@ -125,20 +128,170 @@ class Projects:
                 for statement in migration.split(";"):
                     if statement.strip():
                         db.execute(statement)
+        with self.connect() as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] == 1:
+                db.execute("PRAGMA foreign_keys=OFF")
+                db.execute("BEGIN IMMEDIATE")
+                sql = resources.files("rah").joinpath("workspace_v3.sql").read_text(encoding="utf-8")
+                for statement in sql.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                if db.execute("PRAGMA foreign_key_check").fetchone():
+                    raise Problem("workspace_migration", "Workspace migration found invalid file references.")
+        with self.connect() as db:
+            saved = db.execute("SELECT path FROM workspace_setting WHERE id=1").fetchone()
+            self.workspace_root = self.check_root(Path(saved[0])) if saved else root
+            self.prepare_workspace(self.workspace_root)
+            for row in db.execute("SELECT * FROM chat"):
+                if row["legacy_project_id"] and not row["trash_state"]:
+                    source = child(self.directory(UNFILED), "chats", row["id"])
+                    target = self.chat_directory(row)
+                    if source.exists():
+                        if target.exists():
+                            raise Problem("workspace_migration", "Both legacy and new chat folders exist. Resolve the conflict before reopening RAH.")
+                        source.rename(target)
+                if not row["trash_state"]:
+                    directory = self.chat_directory(row)
+                    # Old versions created this intermediate directory implicitly,
+                    # under the already-private workspace, using the caller's umask.
+                    if os.name != "nt" and directory.is_dir() and directory.stat().st_uid == os.getuid():
+                        directory.chmod(0o700)
+                    self.prepare_chat(row)
+        self.reconcile_trash()
+
+    @staticmethod
+    def check_root(path):
+        if not path.is_absolute() or ".." in path.parts or path.drive.startswith("\\\\"):
+            raise Problem("workspace_path", "Choose an absolute, local folder path.")
+        if any((item.exists() or item.is_symlink()) and is_link(item) for item in (path, *path.parents)):
+            raise Problem("workspace_path", "Choose a workspace folder without filesystem redirects.")
+        private_directory(path)
+        verify_windows_root(path)
+        return path
+
+    @staticmethod
+    def prepare_workspace(root):
+        for name in ("projects", "chats", "trash"):
+            verify_windows_root(private_directory(child(root, name)))
+
+    def move_workspace(self, value):
+        if not isinstance(value, str) or not value.strip() or len(value) > 4096 or "\0" in value:
+            raise Problem("workspace_path", "Enter an absolute, local workspace folder path.")
+        target = Path(value).expanduser()
+        source = self.workspace_root
+        if target == source:
+            return
+        if target != self.root and (target.is_relative_to(self.root) or self.root.is_relative_to(target)):
+            raise Problem("workspace_path", "Choose a folder outside the RAH installation and data root.")
+        if source != self.root and (target.is_relative_to(source) or source.is_relative_to(target)):
+            raise Problem("workspace_path", "Choose a folder separate from the current workspace.")
+        self.check_root(target)
+        names = ("projects", "chats", "trash")
+        if target != self.root and any(not re.fullmatch(r"\.rah-backup-[0-9a-f]{32}", item.name) for item in target.iterdir()):
+            raise Problem("workspace_path", "Choose an empty workspace folder or a previous RAH workspace location.")
+        destinations = [child(target, name) for name in names]
+        if any(path.exists() and (not path.is_dir() or any(path.iterdir())) for path in destinations):
+            raise Problem("workspace_path", "The destination already has workspace files. Choose an empty folder.")
+        stage = private_directory(child(target, ".rah-move-" + uuid4().hex))
+
+        def copy_file(src, dest):
+            if is_link(Path(src)) or not stat.S_ISREG(Path(src).lstat().st_mode):
+                raise Problem("workspace_path", "Remove linked or special files from the workspace before moving it.")
+            shutil.copy2(src, dest)
+
+        def reject_links(folder, entries):
+            if any(is_link(Path(folder) / name) for name in entries):
+                raise Problem("workspace_path", "Remove linked files from the workspace before moving it.")
+            return []
+
+        placed = []
+        try:
+            for name in names:
+                shutil.copytree(child(source, name), child(stage, name), ignore=reject_links, copy_function=copy_file)
+            for name, path in zip(names, destinations):
+                if path.exists():
+                    path.rmdir()
+                child(stage, name).rename(path)
+                placed.append(path)
+            with self.connect(write=True) as db:
+                db.execute("INSERT OR REPLACE INTO workspace_setting VALUES (1, ?)", (str(target),))
+        except BaseException:
+            for path in placed:
+                shutil.rmtree(path, ignore_errors=True)
+            if target == self.root:
+                self.prepare_workspace(target)
+            raise
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        self.workspace_root = target
+        # The new location is authoritative. Archive the old copy, never delete it.
+        backup = None
+        try:
+            backup = private_directory(child(source, ".rah-backup-" + uuid4().hex))
+            for name in names:
+                child(source, name).rename(child(backup, name))
+        except OSError:
+            return {"backup": str(backup or source), "previous": str(source), "backup_split": True}
+        return {"backup": str(backup)}
 
     def list_chats(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM chat ORDER BY updated_at DESC, rowid DESC")]
+            return [self.chat_data(row) for row in db.execute(
+                "SELECT * FROM chat WHERE trash_state IS NULL ORDER BY updated_at DESC, rowid DESC")]
+
+    @staticmethod
+    def chat_data(row):
+        return {key: row[key] for key in ("id", "project_id", "title", "app", "created_at", "updated_at")} | {
+            "scope_id": row["project_id"] or row["id"], "legacy_project_id": row["legacy_project_id"]}
+
+    def chat_directory(self, row):
+        return (child(self.directory(row["project_id"]), "chats", row["id"]) if row["project_id"]
+                else child(self.workspace_root, "chats", row["id"]))
+
+    def prepare_chat(self, row):
+        directory = self.chat_directory(row)
+        private_directory(directory)
+        private_directory(child(directory, "files"))
+        return directory
+
+    def insert_chat(self, db, project, title, app):
+        chat, date = str(uuid4()), now()
+        if project is None:
+            db.execute("INSERT INTO scope VALUES (?)", (chat,))
+        db.execute("INSERT INTO chat (id,project_id,title,app,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+                   (chat, project, title, app, date, date))
+        row = db.execute("SELECT * FROM chat WHERE id=?", (chat,)).fetchone()
+        directory = self.chat_directory(row)
+        try:
+            if project:
+                private_directory(directory.parent)
+            self.prepare_chat(row)
+        except (OSError, Problem):
+            if directory.is_dir() and not is_link(directory):
+                shutil.rmtree(directory, ignore_errors=True)
+            raise
+        return row
+
+    def create_chat(self, project, title="New chat", app="gptr"):
+        if not isinstance(title, str) or not title.strip() or len(title) > 160 or app not in ("ldr", "gptr", "pqa"):
+            raise Problem("chat_title", "Choose an app and a chat title of 1 to 160 characters.")
+        with self.connect(write=True) as db:
+            if project is not None:
+                self.require(db, project)
+            return self.chat_data(self.insert_chat(db, project, title.strip(), app))
 
     def require_chat(self, db, project, chat):
-        row = db.execute("SELECT * FROM chat WHERE id=? AND project_id=?", (id_value(chat), project)).fetchone()
+        row = db.execute("""SELECT * FROM chat WHERE id=? AND trash_state IS NULL
+                         AND (COALESCE(project_id,id)=? OR legacy_project_id=?)""",
+                         (id_value(chat), project, project)).fetchone()
         if row is None:
             raise Problem("chat_missing", "Chat not found in this project.", 404)
         return dict(row)
 
     def workspace_entry(self, db, project, entry):
-        row = db.execute("""SELECT e.*, c.project_id FROM chat_entry e JOIN chat c ON c.id=e.chat_id
-                            WHERE e.id=? AND c.project_id=?""", (id_value(entry), project)).fetchone()
+        row = db.execute("""SELECT e.*, COALESCE(c.project_id,c.id) AS project_id FROM chat_entry e JOIN chat c ON c.id=e.chat_id
+                            WHERE e.id=? AND c.trash_state IS NULL AND (COALESCE(c.project_id,c.id)=? OR c.legacy_project_id=?)""",
+                         (id_value(entry), project, project)).fetchone()
         if not row:
             raise Problem("entry_missing", "Request not found in this project.", 404)
         return self.entry_data(row)
@@ -157,7 +310,7 @@ class Projects:
 
     def get_chat(self, project, chat):
         with self.connect() as db:
-            data = self.require_chat(db, project, chat)
+            data = self.chat_data(self.require_chat(db, project, chat))
             data["entries"] = [self.entry_data(row) for row in db.execute(
                 "SELECT * FROM chat_entry WHERE chat_id=? ORDER BY rowid", (chat,))]
             return data
@@ -181,15 +334,16 @@ class Projects:
         return self.entry_data(previous) if previous else None
 
     def accept(self, project, chat, entry, app, action, mode, question, quote, title, pdfs, ready):
-        project = id_value(project) if project is not None else UNFILED
+        project = id_value(project) if project is not None else None
         chat = id_value(chat) if chat is not None else None
         entry = id_value(entry)
         intent = json.dumps([project, chat, app, action, mode, question, quote, pdfs], ensure_ascii=False)
         with self.connect(write=True) as db:
             if previous := self.replay(db, entry, intent):
-                return previous | {"project_id": project, "replay": True}
+                scope = project or previous["chat_id"]
+                return self.workspace_entry(db, scope, entry) | {"replay": True}
             if chat:
-                self.require_chat(db, project, chat)
+                self.require_chat(db, project or chat, chat)
                 if action == "managed" and db.execute(
                     """SELECT 1 FROM chat_entry WHERE chat_id=? AND action='managed'
                        AND state IN ('Preparing','Awaiting approval','Running')""", (chat,)
@@ -197,15 +351,16 @@ class Projects:
                     raise Problem("chat_busy", "Finish or discard the active request in this chat.", 409)
             ready()
             date = now()
-            if project == UNFILED:
-                db.execute("INSERT OR IGNORE INTO project VALUES (?, 'Unfiled', 0, ?, ?)", (project, date, date))
-                private_directory(child(self.directory(project), "files"))
-            self.require(db, project)
+            if not chat and project is not None:
+                self.require(db, project)
             if pdfs:
-                self.select_pdf_rows(db, project, pdfs)
+                if not (project or chat):
+                    raise Problem("pdf_selection", "Create a chat before selecting saved PDFs.")
+                self.select_pdf_rows(db, project or chat, pdfs)
             if not chat:
-                chat = str(uuid4())
-                db.execute("INSERT INTO chat VALUES (?, ?, ?, ?, ?, ?)", (chat, project, title[:160], app, date, date))
+                chat = self.insert_chat(db, project, title[:160], app)["id"]
+            project = project or chat
+            self.require_scope(db, project)
             db.execute("""INSERT INTO chat_entry
                 (id,chat_id,app,action,mode,question,quote,intent,state,input_ids,created_at,updated_at)
                 VALUES (?,?,?,?,?,?,?,?,'Preparing',?,?,?)""",
@@ -249,6 +404,83 @@ class Projects:
             raise Problem("stale_project", "Project changed. Reload and try again.", 409)
         return dict(row)
 
+    def require_scope(self, db, scope):
+        scope = id_value(scope)
+        project = db.execute("SELECT * FROM project WHERE id=?", (scope,)).fetchone()
+        if project:
+            return dict(project)
+        row = db.execute("SELECT * FROM chat WHERE id=? AND project_id IS NULL AND trash_state IS NULL", (scope,)).fetchone()
+        if not row:
+            raise Problem("workspace_missing", "Project or standalone chat not found.", 404)
+        return self.chat_data(row) | {"name": row["title"], "revision": 0}
+
+    def folder(self, scope, chat=None):
+        with self.connect() as db:
+            self.require_scope(db, scope)
+            if chat or not db.execute("SELECT 1 FROM project WHERE id=?", (scope,)).fetchone():
+                return self.chat_directory(self.require_chat(db, scope, chat or scope))
+            return self.directory(scope)
+
+    def native_outputs(self, scope, chat=None):
+        folder = self.folder(scope, chat)
+        output = child(folder, "gptr", "outputs")
+        if not output.exists():
+            return []
+        return [{"name": item.name, "size": item.stat().st_size} for item in sorted(output.iterdir())[:500]
+                if not is_link(item) and item.is_file() and item.suffix.lower() in {".md", ".pdf", ".docx", ".txt", ".json"}]
+
+    def native_output(self, scope, chat, filename):
+        folder = self.folder(scope, chat)
+        if not filename or filename not in {item["name"] for item in self.native_outputs(scope, chat)}:
+            raise Problem("artifact_missing", "Native output not found.", 404)
+        return child(folder, "gptr", "outputs", filename)
+
+    def trash_chat(self, chat):
+        chat = id_value(chat)
+        with self.connect(write=True) as db:
+            row = db.execute("SELECT * FROM chat WHERE id=? AND trash_state IS NULL", (chat,)).fetchone()
+            if not row:
+                raise Problem("chat_missing", "Chat not found.", 404)
+            if db.execute("SELECT 1 FROM chat_entry WHERE chat_id=? AND state IN ('Preparing','Awaiting approval','Running')", (chat,)).fetchone():
+                raise Problem("chat_busy", "Finish or discard active work before deleting this chat.", 409)
+            if db.execute("""SELECT 1 FROM paper p JOIN artifact a ON a.project_id=p.project_id
+                             AND a.id IN (p.source_artifact_id,p.pdf_artifact_id) WHERE a.chat_id=?""", (chat,)).fetchone():
+                raise Problem("chat_referenced", "Remove or replace Papers Needed references to this chat's files before deleting it.", 409)
+            if db.execute("""SELECT 1 FROM chat_entry e JOIN chat c ON c.id=e.chat_id JOIN json_each(e.input_ids) j
+                              JOIN artifact a ON a.id=j.value AND a.project_id IN (COALESCE(c.project_id,c.id),c.legacy_project_id)
+                              WHERE e.chat_id<>? AND a.chat_id=? AND c.trash_state IS NULL""", (chat, chat)).fetchone():
+                raise Problem("chat_referenced", "Another chat references one of these files. Keep this chat or delete the dependent chat first.", 409)
+            db.execute("UPDATE chat SET trash_state='trashing',trashed_at=? WHERE id=?", (now(), chat))
+        self.reconcile_trash(chat)
+
+    def trash_list(self):
+        with self.connect() as db:
+            return [self.chat_data(row) | {"trashed_at": row["trashed_at"]} for row in db.execute(
+                "SELECT * FROM chat WHERE trash_state='trashed' ORDER BY trashed_at DESC")]
+
+    def has_active(self):
+        with self.connect() as db:
+            return bool(db.execute("SELECT 1 FROM chat_entry WHERE state IN ('Preparing','Awaiting approval','Running')").fetchone())
+
+    def restore_chat(self, chat):
+        with self.connect(write=True) as db:
+            if not db.execute("UPDATE chat SET trash_state='restoring' WHERE id=? AND trash_state='trashed'", (id_value(chat),)).rowcount:
+                raise Problem("chat_missing", "Chat not found in Trash.", 404)
+        self.reconcile_trash(chat)
+
+    def reconcile_trash(self, chat=None):
+        with self.connect(write=True) as db:
+            for row in db.execute("SELECT * FROM chat WHERE trash_state IN ('trashing','restoring') AND id=COALESCE(?,id)", (chat,)):
+                live, trash = self.chat_directory(row), child(self.workspace_root, "trash", row["id"])
+                restoring = row["trash_state"] == "restoring"
+                source, dest = (trash, live) if restoring else (live, trash)
+                if source.exists() == dest.exists():
+                    raise Problem("trash_conflict", "RAH could not locate a unique chat folder. Check the workspace and Trash before retrying.", 409)
+                if source.exists():
+                    source.rename(dest)
+                db.execute("UPDATE chat SET trash_state=?,trashed_at=? WHERE id=?",
+                           (None if restoring else "trashed", None if restoring else row["trashed_at"], row["id"]))
+
     def change(self, db, project):
         db.execute("UPDATE project SET revision=revision+1, updated_at=? WHERE id=?", (now(), project))
 
@@ -256,31 +488,40 @@ class Projects:
         if not isinstance(name, str) or not name.strip() or len(name) > 160:
             raise Problem("project_name", "Enter a project name of 1 to 160 characters.")
         project = str(uuid4())
-        directory = private_directory(child(self.root, "projects", project))
+        directory = private_directory(self.directory(project))
         private_directory(child(directory, "files"))
         date = now()
         with self.connect(write=True) as db:
-            db.execute("INSERT INTO project VALUES (?, ?, 0, ?, ?)", (project, name.strip(), date, date))
+            db.execute("INSERT INTO scope VALUES (?)", (project,))
+            db.execute("INSERT INTO project (id,name,revision,created_at,updated_at) VALUES (?, ?, 0, ?, ?)", (project, name.strip(), date, date))
         return project
 
     def list(self):
         with self.connect() as db:
-            return [dict(row) for row in db.execute("SELECT * FROM project ORDER BY updated_at DESC")]
+            return [dict(row) for row in db.execute("SELECT * FROM project WHERE legacy_hidden=0 ORDER BY updated_at DESC")]
 
-    def get(self, project):
+    def get(self, project, chat=None):
         with self.connect() as db:
-            info = self.require(db, project)
-            for table in ("paper", "artifact"):
-                info[table] = [dict(row) for row in db.execute(f"SELECT * FROM {table} WHERE project_id=? ORDER BY rowid", (project,))]
+            info = self.require_scope(db, project)
+            owner = self.require_chat(db, project, chat) if chat else None
+            info["paper"] = [dict(row) for row in db.execute("SELECT * FROM paper WHERE project_id=? ORDER BY rowid", (project,))]
+            legacy = owner["legacy_project_id"] if owner else (db.execute("SELECT legacy_project_id FROM chat WHERE id=?", (project,)).fetchone() or [None])[0]
+            info["artifact"] = [dict(row) for row in db.execute("""SELECT a.* FROM artifact a LEFT JOIN chat c ON c.id=a.chat_id
+                WHERE c.trash_state IS NULL AND ((a.project_id=? AND (? IS NULL OR a.chat_id=?))
+                    OR (a.project_id=? AND (a.chat_id=? OR (? IS NULL AND a.chat_id IS NULL)))) ORDER BY a.rowid""",
+                    (project, chat, chat, legacy, chat or project, chat))]
             return info
 
     def directory(self, project):
-        return child(self.root, "projects", id_value(project))
+        return child(self.workspace_root, "projects", id_value(project))
 
     def artifact(self, project, artifact):
         with self.connect() as db:
-            self.require(db, project)
-            row = db.execute("SELECT * FROM artifact WHERE project_id=? AND id=?", (project, id_value(artifact))).fetchone()
+            self.require_scope(db, project)
+            row = db.execute("""SELECT a.* FROM artifact a LEFT JOIN chat c ON c.id=a.chat_id
+                 WHERE a.id=? AND c.trash_state IS NULL AND (a.project_id=? OR (c.id=? AND c.legacy_project_id=a.project_id)
+                 OR (a.chat_id IS NULL AND a.project_id=(SELECT legacy_project_id FROM chat WHERE id=?)))""",
+                             (id_value(artifact), project, project, project)).fetchone()
         if not row:
             raise Problem("artifact_missing", "Artifact not found.", 404)
         return dict(row)
@@ -289,10 +530,12 @@ class Projects:
         return child(self.files_directory(row["project_id"], row.get("chat_id")), row["storage_name"])
 
     def files_directory(self, project, chat=None):
-        directory = self.directory(project)
-        return child(directory, "chats", id_value(chat), "files") if chat else child(directory, "files")
+        if chat:
+            with self.connect() as db:
+                return child(self.chat_directory(self.require_chat(db, project, chat)), "files")
+        return child(self.folder(project), "files")
 
-    def register(self, project, stream, filename, kind, revision=None, app=None, version=None, run_id=None, bib=None, *, entry=None, attachment_id=None):
+    def register(self, project, stream, filename, kind, revision=None, app=None, version=None, run_id=None, bib=None, *, entry=None, attachment_id=None, chat=None):
         if not isinstance(filename, str) or not filename or len(filename) > 255 or any(ord(char) < 32 for char in filename):
             raise Problem("file_name", "The file name is invalid.")
         suffix = PurePath(filename).suffix.lower()
@@ -300,10 +543,16 @@ class Projects:
         if suffix not in valid.get(kind, {}):
             raise Problem("file_type", "Select a PDF, Markdown, plain-text, JSON or RIS file as appropriate.")
         with self.connect() as db:
-            self.require(db, project, revision)
+            scope = self.require_scope(db, project)
+            if revision is not None and revision != scope["revision"]:
+                raise Problem("stale_project", "Project changed. Reload and try again.", 409)
             request = self.workspace_entry(db, project, entry) if entry else None
-        chat = request["chat_id"] if request else None
-        directory = private_directory(self.files_directory(project, chat))
+            chat = request["chat_id"] if request else chat or (project if scope.get("scope_id") else None)
+            if chat:
+                self.require_chat(db, project, chat)
+        directory = self.files_directory(project, chat)
+        if not directory.is_dir():
+            private_directory(directory)
         artifact = id_value(attachment_id) if attachment_id else str(uuid4())
         stored_name = artifact + suffix
         destination = child(directory, stored_name)
@@ -334,7 +583,11 @@ class Projects:
                 except UnicodeError as error:
                     raise Problem("file_format", "The report must be UTF-8 text.") from error
             with self.connect(write=True) as db:
-                self.require(db, project, revision)
+                scope = self.require_scope(db, project)
+                if revision is not None and revision != scope["revision"]:
+                    raise Problem("stale_project", "Project changed. Reload and try again.", 409)
+                if chat:
+                    self.require_chat(db, project, chat)
                 checksum = file_digest(temp_path)
                 if run_id:
                     previous = db.execute("SELECT id, chat_id FROM artifact WHERE project_id=? AND run_id=?", (project, run_id)).fetchone()
@@ -418,7 +671,8 @@ class Projects:
                 pdf = row.get("pdf_artifact_id") if state == "supplied" else None
                 source = row.get("source_artifact_id")
                 if state == "supplied":
-                    if not pdf or not db.execute("SELECT 1 FROM artifact WHERE project_id=? AND id=? AND kind='pdf'", (project, id_value(pdf))).fetchone():
+                    if not pdf or not db.execute("""SELECT 1 FROM artifact a LEFT JOIN chat c ON c.id=a.chat_id
+                            WHERE a.project_id=? AND a.id=? AND a.kind='pdf' AND c.trash_state IS NULL""", (project, id_value(pdf))).fetchone():
                         raise Problem("pdf_association", "Pick a PDF from this project.")
                 if source and not db.execute("SELECT 1 FROM artifact WHERE project_id=? AND id=?", (project, id_value(source))).fetchone():
                     raise Problem("source_association", "Pick an original source from this project.")
@@ -434,7 +688,7 @@ class Projects:
 
     def selected_pdfs(self, project, ids):
         with self.connect() as db:
-            self.require(db, project)
+            self.require_scope(db, project)
             return self.select_pdf_rows(db, project, ids)
 
     @staticmethod
@@ -446,8 +700,11 @@ class Projects:
             raise Problem("pdf_selection", "Select each PDF once.")
         rows = []
         for artifact in ids:
-            row = db.execute("SELECT * FROM artifact WHERE project_id=? AND id=? AND kind='pdf'",
-                             (project, artifact)).fetchone()
+            row = db.execute("""SELECT a.* FROM artifact a LEFT JOIN chat c ON c.id=a.chat_id
+                 WHERE a.id=? AND a.kind='pdf' AND c.trash_state IS NULL
+                 AND (a.project_id=? OR (c.id=? AND c.legacy_project_id=a.project_id)
+                 OR (a.chat_id IS NULL AND a.project_id=(SELECT legacy_project_id FROM chat WHERE id=?)))""",
+                             (artifact, project, project, project)).fetchone()
             if row is None:
                 raise Problem("pdf_selection", "A selected PDF is unavailable in this project.", 409)
             rows.append(dict(row))

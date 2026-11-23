@@ -14,17 +14,17 @@ let poll;
 let routeGeneration = 0;
 
 function projectPath(project) { return "/projects/" + project; }
-function projectLabel(project) { return workspace?.projects.find(item => item.id === project)?.name || "Unfiled"; }
-function destination() { return locationState.project || workspace.unfiled; }
+function projectLabel(project) { return workspace?.projects.find(item => item.id === project)?.name || "Workspace"; }
+function destination() { return locationState.project || locationState.chat; }
 function draft() {
   const key = locationState.chat || "new:" + destination();
-  if (!drafts.has(key)) drafts.set(key, {app: "gptr", questions: {}, quote: "", pdfs: [], files: [], mode: "research_report"});
+  if (!drafts.has(key)) drafts.set(key, {app: "gptr", question: "", quote: "", pdfs: [], files: [], mode: "research_report"});
   return drafts.get(key);
 }
 
 function route(project, chat, page) {
-  const path = [project, chat || "-", page].filter(Boolean).join("/");
-  const hash = project ? "#" + path.replace(/\/-$/, "") : "";
+  const path = [project || "chat", chat || "-", page].filter(Boolean).join("/");
+  const hash = project || chat ? "#" + path.replace(/\/-$/, "") : "";
   const next = hash || "/";
   if (location.hash !== hash) history.pushState({}, "", next);
   if (narrow.matches) sidebar(false);
@@ -33,8 +33,8 @@ function route(project, chat, page) {
 
 function readRoute() {
   const [project, chat, page, extra] = location.hash.slice(1).split("/");
-  if (!UUID.test(project || "") || extra !== undefined) return {};
-  return {project, chat: UUID.test(chat || "") ? chat : undefined,
+  if ((!UUID.test(project || "") && !(project === "chat" && UUID.test(chat || ""))) || extra !== undefined) return {};
+  return {project: project === "chat" ? undefined : project, chat: UUID.test(chat || "") ? chat : undefined,
     page: ["files", "papers"].includes(page) ? page : undefined};
 }
 
@@ -79,7 +79,7 @@ function editName(title, initial, action) {
 }
 
 function chatLink(chat) {
-  const link = button(chat.title, () => route(chat.project_id, chat.id));
+  const link = button(chat.title, () => route(chat.project_id || undefined, chat.id));
   link.className = "chat-link";
   link.title = chat.title;
   if (locationState.chat === chat.id) link.setAttribute("aria-current", "page");
@@ -91,8 +91,7 @@ function renderSidebar() {
   recent.replaceChildren(...workspace.chats.slice(0, 8).map(chatLink));
   if (!workspace.chats.length) recent.append(element("p", "No chats yet"));
   const projectList = document.querySelector("#projects");
-  const items = workspace.projects.filter(item => item.id !== workspace.unfiled);
-  items.push({id: workspace.unfiled, name: "Unfiled"});
+  const items = workspace.projects;
   projectList.replaceChildren(...items.map(project => {
     const group = element("details");
     group.open = expanded.has(project.id) || locationState.project === project.id;
@@ -100,9 +99,23 @@ function renderSidebar() {
     group.ontoggle = () => { if (group.open) expanded.add(project.id); else expanded.delete(project.id); };
     const open = button("Open project", () => route(project.id));
     const chats = workspace.chats.filter(chat => chat.project_id === project.id);
-    group.append(toggle, open, ...chats.map(chatLink));
+    group.append(toggle, open, button("New chat in project", () => newChat(project.id)), ...chats.map(chatLink));
     return group;
   }));
+  const standalone = workspace.chats.filter(chat => !chat.project_id);
+  if (standalone.length) {
+    const group = element("details");
+    group.open = true;
+    group.append(element("summary", "Standalone chats"), ...standalone.map(chatLink));
+    projectList.append(group);
+  }
+}
+
+async function newChat(project) {
+  const item = await api("/chats", {project_id: project});
+  if (project) expanded.add(project);
+  await route(project, item.id);
+  composer?.querySelector("textarea")?.focus();
 }
 
 function fileURL(project, id) { return projectPath(project) + "/artifacts/" + id; }
@@ -207,11 +220,20 @@ async function dispatchPaper(entry, local, ids) {
   if (locationState.chat === entry.chat_id && screen === "workspace") paperReview(entry, info);
 }
 
-async function nativeLaunch(entry) {
-  const endpoint = "/apps/" + entry.app;
-  const request = {entry_id: entry.id, project_id: entry.project_id};
-  let result = await api(endpoint + "/launch", request);
-  while (result.state === "Starting") {
+async function launchNative(app, request) {
+  const endpoint = "/apps/" + app;
+  let result;
+  try { result = await api(endpoint + "/launch", request); }
+  catch (error) {
+    if (error.code !== "native_workspace_restart" || !confirm("Stop the current GPT Researcher Classic session and reopen it for this folder? Running research in Classic may be interrupted.")) throw error;
+    await api(endpoint + "/stop", {});
+    for (let i = 0; i < 35; ++i) {
+      await new Promise(resolve => setTimeout(resolve, 350));
+      if (["Stopped", "Exited"].includes((await api(endpoint + "/browser")).state)) break;
+    }
+    result = await api(endpoint + "/launch", request);
+  }
+  for (let i = 0; i < 175 && ["Starting", "Waiting for the native app to become ready"].includes(result.state); ++i) {
     await new Promise(resolve => setTimeout(resolve, 700));
     result = await api(endpoint + "/browser");
   }
@@ -219,6 +241,11 @@ async function nativeLaunch(entry) {
     result = await api(endpoint + "/launch", {...request, ready_generation: result.generation});
   }
   if (!result.url && !result.command_line) throw new Error(result.state || "The native app could not open.");
+  return result;
+}
+
+async function nativeLaunch(entry) {
+  const result = await launchNative(entry.app, {entry_id: entry.id, project_id: entry.project_id});
   nativeReceipts.set(entry.id, result);
   return result;
 }
@@ -226,11 +253,12 @@ async function nativeLaunch(entry) {
 function showNative(entry, result) {
   const {dialog, act, show} = modal(result.command_line ? "Standalone PaperQA2" : names[entry.app] + " is ready");
   if (result.command_line) dialog.append(element("p", result.note), element("pre", result.command_line));
-  else dialog.append(element("p", "Enter the question in the native app. Attach the exported report or RIS here when it is ready."),
+  else dialog.append(element("p", result.prefill_prepared ? "Review the editable draft in the native app. Research has not started."
+    : "Prefill was not available. Copy the draft and paste it into the native app. Research has not started."),
     external("Open " + names[entry.app], result.url));
   show(act("Close", () => dialog.close()), ...(result.command_line ? [
     act("Copy command", async () => { await navigator.clipboard.writeText(result.command_line); dialog.close(); }, true)
-  ] : []));
+  ] : entry.question ? [act("Copy question", () => navigator.clipboard.writeText(entry.question), true)] : []));
 }
 
 async function submit(current, data) {
@@ -248,17 +276,18 @@ async function submit(current, data) {
       current.pdfs = [];
       current.quote = "";
     }
-    current.questions[data.app] = "";
+    if (data.action !== "native") current.question = "";
   }
   drafts.set(entry.chat_id, current);
-  if (entry.replay && entry.state !== "Preparing") { if (visible) await route(entry.project_id, entry.chat_id); return; }
-  if (visible) await route(entry.project_id, entry.chat_id);
+  const project = entry.project_id === entry.chat_id ? undefined : entry.project_id;
+  if (entry.replay && entry.state !== "Preparing") { if (visible) await route(project, entry.chat_id); return; }
+  if (visible) await route(project, entry.chat_id);
   try {
     if (data.action === "native") {
       const native = await nativeLaunch(entry);
       if (locationState.chat === entry.chat_id && screen === "workspace") showNative(entry, native);
     } else if (entry.app === "gptr") {
-      await api(projectPath(entry.project_id) + "/gptr-reports", {entry_id: entry.id});
+      await api(projectPath(entry.project_id) + "/gptr-reports", {entry_id: entry.id, recipients: data.recipients});
     } else {
       const local = staged.get(entry.id);
       await dispatchPaper(entry, local, [...entry.input_ids]);
@@ -279,7 +308,7 @@ function confirmPublic(current, data, readiness) {
     readiness.recipients.join(" and ") + ". Research may also fetch public websites."),
     element("blockquote", data.question));
   show(act("Cancel", () => dialog.close()), act("Confirm and run", async () => {
-    await submit(current, {...data, public: true});
+    await submit(current, {...data, public: true, recipients: readiness.recipients});
     dialog.close();
   }, true));
 }
@@ -348,8 +377,8 @@ function fileControl(parent, label, multiple, extensions, action) {
 
 function setApp(current, app) {
   current.app = app;
-  const {project, chat} = locationState;
-  if (chat) api(projectPath(project) + "/chats/" + chat, {app}).catch(error => say(error.message));
+  const {chat} = locationState;
+  if (chat) api(projectPath(destination()) + "/chats/" + chat, {app}).catch(error => say(error.message));
 }
 
 function renderComposer() {
@@ -382,8 +411,8 @@ function renderComposer() {
   field.placeholder = app === "pqa" ? "Ask a question about the papers" : app === "ldr" ? "Add a research task or note" : "Enter a public research question";
   field.maxLength = 8000;
   field.rows = 3;
-  field.value = current.questions[app] || "";
-  field.oninput = () => { current.questions[app] = field.value; };
+  field.value = current.question;
+  field.oninput = () => { current.question = field.value; };
   composer.append(toolbar, field);
   if (app === "pqa") {
     const attach = element("div");
@@ -409,7 +438,7 @@ function renderComposer() {
       chips.append(quote);
     }
     fileControl(attach, "Attach PDF", true, ".pdf", files => { addLocalFiles(current, files); renderComposer(); });
-    if (project) attach.append(button("From project", () => picker(current, artifacts)));
+    if (destination()) attach.append(button("From saved files", () => picker(current, artifacts)));
     if (availableCorpus.length && !current.pdfs.length && !current.files.length) attach.append(button("Use last corpus", () => {
       current.pdfs = [...availableCorpus];
       renderComposer();
@@ -419,30 +448,58 @@ function renderComposer() {
   const footer = element("div");
   footer.className = "composer-footer";
   const hint = element("p", !readiness.ready ? readiness.reason : app === "gptr" ?
-    "Public questions only" : app === "pqa" ? "You review the selected material before transfer." : "Research runs in the native LDR window.");
+    "Public questions only · Search: " + readiness.recipients.at(-1) : app === "pqa" ? "You review the selected material before transfer." : "Research runs in the native LDR window.");
   footer.append(hint);
-  const action = app === "ldr" ? "native" : "managed";
-  function payload(action) {
-    return {app, action, project_id: project, chat_id: chat, question: field.value.trim(),
+  function payload(action, target = app) {
+    return {app: target, action, project_id: project, chat_id: chat, question: action === "native" ? field.value : field.value.trim(),
       ...(action === "managed" && app === "gptr" ? {mode: current.mode} : {}),
       ...(action === "managed" && app === "pqa" ? {quote: current.quote, pdfs: current.pdfs.map(item => item.id)} : {})};
   }
-  if (app !== "ldr" && readiness.code !== "app_not_installed") {
-    footer.append(button(app === "pqa" ? "Show standalone command" : "Open native app", () => submit(current, payload("native"))));
+  const availableActions = element("details");
+  availableActions.className = "composer-actions";
+  const menu = element("summary", "Open in…");
+  const options = element("div");
+  availableActions.append(menu, options);
+  availableActions.onkeydown = event => {
+    if (event.key === "Escape" && availableActions.open) { availableActions.open = false; menu.focus(); }
+  };
+  for (const target of ["gptr", "ldr"]) {
+    const open = button(target === "gptr" ? "GPT Researcher Classic" : "Local Deep Research", async () => {
+      availableActions.open = false;
+      await submit(current, payload("native", target));
+    });
+    if (workspace.readiness[target].code === "app_not_installed") open.disabled = true;
+    options.append(open);
   }
+  if (project && !chat && workspace.readiness.gptr.code !== "app_not_installed") {
+    options.append(button("Open Classic for project (no draft)", () => launchNative("gptr", {project_id: project, open: true})));
+  }
+  const copy = button("Copy question & open Local Deep Research", async () => {
+    await navigator.clipboard.writeText(field.value);
+    availableActions.open = false;
+    await submit(current, {...payload("native", "ldr"), question: ""});
+  });
+  copy.disabled = workspace.readiness.ldr.code === "app_not_installed";
+  options.append(copy, button("Show standalone PaperQA2 command", () => submit(current, payload("native", "pqa"))));
+  footer.append(availableActions);
   const send = button(!readiness.ready ? (readiness.code === "app_not_installed" || readiness.code === "unverified_profile" ? "App details" : "Finish setup")
-    : app === "ldr" ? "Open LDR" : app === "pqa" ? "Analyse papers" : "Send", async () => {
+    : app === "pqa" ? "Analyse papers with PaperQA2…" : "Run GPT Researcher report in RAH…", async () => {
     if (!readiness.ready) {
       if (readiness.code === "app_not_installed" || readiness.code === "unverified_profile") return tool("apps");
       await tool("settings");
       if (app === "gptr" && screen === "settings") {
-        for (const details of view.querySelectorAll("details.settings-credentials")) details.open = true;
-        view.querySelector("[data-key=RAH_NATIVE_GPTR__TAVILY_API_KEY]")?.focus();
+        const key = readiness.code === "missing_models" ? "RAH_OPENROUTER_CHAT_MODEL" :
+          ["needs_search_credential", "search_configuration"].includes(readiness.code) ? "RAH_NATIVE_GPTR__RETRIEVER" : null;
+        const input = key ? view.querySelector(`[data-key=${key}]`) : null;
+        for (let parent = input?.parentElement; parent; parent = parent.parentElement) {
+          if (parent.tagName === "DETAILS") parent.open = true;
+        }
+        input?.focus();
       }
       return;
     }
-    const data = payload(action);
-    if (action === "managed" && !data.question) { field.focus(); throw new Error("Enter a question."); }
+    const data = payload("managed");
+    if (!data.question) { field.focus(); throw new Error("Enter a question."); }
     if (app === "pqa") {
       const total = current.pdfs.length + current.files.length;
       if (!total || total > 40) throw new Error("Attach one to 40 PDFs.");
@@ -451,14 +508,18 @@ function renderComposer() {
     await submit(current, data);
   });
   send.className = "primary";
-  if (active && readiness.ready && action === "managed") {
+  if (active && readiness.ready) {
     send.disabled = true;
     hint.textContent = "A request is active in this chat.";
   }
   field.onkeydown = event => {
-    if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !send.disabled) send.click();
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      availableActions.open = true;
+      availableActions.querySelector("button:not(:disabled)")?.focus();
+    }
   };
-  footer.append(send);
+  if (app !== "ldr" || !readiness.ready) footer.append(send);
   composer.append(footer);
 }
 
@@ -528,7 +589,7 @@ async function renderTranscript(next, files, generation) {
       if (["Cancelled", "Failed", "Interrupted"].includes(entry.state)) {
         card.append(button("Use in a new attempt", () => {
           setApp(current, "pqa");
-          current.questions.pqa = entry.question;
+          current.question = entry.question;
           current.quote = entry.quote;
           current.pdfs = entry.input_ids.filter(id => lookup.has(id)).map(id => ({id, name: lookup.get(id).original_name}));
           renderComposer();
@@ -537,12 +598,14 @@ async function renderTranscript(next, files, generation) {
       }
     }
     if (entry.state === "Preparing" && entry.app === "gptr" && entry.action === "managed") {
-      card.append(button("Continue public request", () => {
+      card.append(button("Continue public request", async () => {
+        const readiness = (await api("/workspace")).readiness.gptr;
+        if (!readiness.ready) throw new Error(readiness.reason);
         const {dialog, act, show} = modal("Continue public request");
         dialog.append(element("p", "Send the saved public question to " +
-          (workspace.readiness.gptr.recipients || []).join(" and ") + "."), element("blockquote", entry.question));
+          readiness.recipients.join(" and ") + "."), element("blockquote", entry.question));
         show(act("Cancel", () => dialog.close()), act("Confirm and run", async () => {
-          await api(projectPath(project) + "/gptr-reports", {entry_id: entry.id});
+          await api(projectPath(project) + "/gptr-reports", {entry_id: entry.id, recipients: readiness.recipients});
           dialog.close();
           await refreshConversation();
         }, true));
@@ -594,10 +657,11 @@ async function refreshConversation() {
   const generation = routeGeneration;
   const {project, chat} = locationState;
   if (screen !== "workspace") return;
-  const path = projectPath(project);
+  const scope = destination();
+  const path = projectPath(scope);
   const result = await Promise.all([
     chat ? api(path + "/chats/" + chat) : null,
-    project && workspace.projects.some(item => item.id === project) ? api(path) : null
+    scope ? api(path) : null
   ]);
   if (generation !== routeGeneration || screen !== "workspace") return;
   const stickToEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 100;
@@ -625,20 +689,32 @@ function navHeader() {
   breadcrumbs.replaceChildren();
   if (project && currentChat) {
     breadcrumbs.append(button(label, () => route(project)), element("span", " / "), element("strong", currentChat.title));
-  } else breadcrumbs.append(element("strong", label));
+  } else breadcrumbs.append(element("strong", currentChat?.title || label));
   projectTools.replaceChildren();
-  if (project && workspace.projects.some(item => item.id === project)) {
+  if (currentChat || project && workspace.projects.some(item => item.id === project)) {
     projectTools.append(button("Files", () => route(project, chat, "files")),
-      button("Papers Needed", () => route(project, chat, "papers")));
+      button("Open folder", () => api(projectPath(destination()) + "/open-folder", {chat_id: chat})));
+    if (project) projectTools.append(button("Papers Needed", () => route(project, chat, "papers")),
+      button("New chat in project", () => newChat(project)));
   }
   if (locationState.page || screen !== "workspace") projectTools.prepend(button("Back to chat", () => route(project, chat)));
   if (currentChat && screen === "workspace") {
     const rename = button("Rename", () => editName("Rename chat", currentChat.title, async title => {
-      await api(projectPath(project) + "/chats/" + chat, {title});
+      await api(projectPath(destination()) + "/chats/" + chat, {title});
       await openWorkspace();
     }));
     rename.setAttribute("aria-label", "Rename chat");
     projectTools.append(rename);
+    projectTools.append(button("Delete chat", () => {
+      const {dialog, act, show} = modal("Delete chat?");
+      dialog.append(element("p", "Move this chat and its private files to Trash? Project files and native app history are kept."));
+      show(act("Cancel", () => dialog.close()), act("Move to Trash", async () => {
+        await api("/chats/" + chat + "/trash", {});
+        drafts.delete(chat);
+        dialog.close();
+        await route(project);
+      }, true));
+    }));
   }
 }
 
@@ -650,7 +726,13 @@ async function openWorkspace() {
   const fresh = await api("/workspace");
   if (generation !== routeGeneration) return;
   workspace = fresh;
-  if (locationState.chat && !workspace.chats.some(item => item.id === locationState.chat && item.project_id === locationState.project)) {
+  const legacy = workspace.chats.find(item => item.id === locationState.chat && item.legacy_project_id && item.legacy_project_id === locationState.project);
+  if (legacy) {
+    locationState.project = undefined;
+    history.replaceState({}, "", "#chat/" + legacy.id + (locationState.page === "files" ? "/files" : ""));
+    if (locationState.page === "papers") locationState.page = undefined;
+  }
+  if (locationState.chat && !workspace.chats.some(item => item.id === locationState.chat && (item.project_id || undefined) === locationState.project)) {
     locationState = {project: locationState.project};
     say("This chat is unavailable.");
   }
@@ -661,7 +743,7 @@ async function openWorkspace() {
     screen = locationState.page;
     view.className = "secondary";
     navHeader();
-    await showProject(locationState.project, undefined, locationState.page);
+    await showProject(destination(), undefined, locationState.page, locationState.chat);
     return;
   }
   screen = "workspace";
@@ -702,13 +784,7 @@ toggle.onclick = () => sidebar(toggle.getAttribute("aria-expanded") !== "true");
 if (token) {
   for (const item of document.querySelectorAll("#sidebar button")) item.disabled = false;
   document.querySelectorAll("[data-view]").forEach(node => { node.onclick = () => { say(""); tool(node.dataset.view); }; });
-  document.querySelector("#new-chat").onclick = () => {
-    if (!workspace) return;
-    const project = locationState.project;
-    drafts.delete("new:" + destination());
-    route(project).catch(error => say(error.message));
-    if (narrow.matches) sidebar(false);
-  };
+  document.querySelector("#new-chat").onclick = () => newChat().catch(error => say(error.message));
   document.querySelector("#new-project").onclick = () => editName("New project", "", async name => {
     const item = await api("/projects", {name});
     expanded.add(item.id);

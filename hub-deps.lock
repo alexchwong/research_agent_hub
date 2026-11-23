@@ -176,6 +176,7 @@ markupsafe==3.0.4 \
     #   flask
     #   jinja2
     #   werkzeug
+modelspell @ https://github.com/alexchwong/modelSpell/releases/download/v0.4.0/modelspell-0.4.0-py3-none-any.whl --hash=sha256:9ae1c5af17666298c519d78ab5b4dd49371cbb40a5c7f028185de8f46dbada88
 python-dotenv==1.2.2 \
     --hash=sha256:1d8214789a24de455a8b8bd8ae6fe3c6b69a5e3d64aa8a8e5d68e694bbcb285a \
     --hash=sha256:2c371a91fbd7ba082c2c1dc1f8bf89ca22564a087c2c287cd9b662adde799cf3

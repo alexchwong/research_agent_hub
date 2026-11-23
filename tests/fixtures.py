@@ -50,6 +50,7 @@ def main():
 
 GPT = """
 import argparse
+import os
 from pathlib import Path
 
 p = argparse.ArgumentParser()
@@ -58,6 +59,8 @@ p.add_argument("--no-pdf", action="store_true")
 p.add_argument("--no-docx", action="store_true")
 p.add_argument("question")
 args = p.parse_args()
+assert os.environ.get("RETRIEVER") == "pubmed_central"
+assert not os.environ.get("TAVILY_API_KEY")
 Path("outputs").mkdir(exist_ok=True)
 Path("outputs/fixture.md").write_text("# Native result: " + args.question, encoding="utf-8")
 """

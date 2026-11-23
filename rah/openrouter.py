@@ -6,6 +6,8 @@ from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
+from modelspell import Endpoint, ModelSpellError, list_models
+
 from .common import Problem, digest
 
 
@@ -49,6 +51,17 @@ def amount(value):
     except InvalidOperation:
         pass
     return None
+
+
+def discover_models(family, key):
+    # modelSpell 0.4.0 lists /models; use its compatible discovery client
+    # with the embeddings API prefix for the separate vector catalogue.
+    endpoint = (Endpoint("openrouter", api_key=key, api_key_env="") if family == "chat" else
+                Endpoint("openai_compat", base_url="https://openrouter.ai/api/v1/embeddings", api_key=key))
+    try:
+        return [item.raw | {"id": item.id} for item in list_models(endpoint, timeout=10)[:10000]]
+    except ModelSpellError as error:
+        raise Problem("catalogue_unavailable", "The OpenRouter model catalogue could not be loaded.", 503) from error
 
 
 class OpenRouter:
@@ -106,7 +119,7 @@ class OpenRouter:
             cached = self.catalogue.get(family)
             if cached and monotonic() - cached[1] < 900:
                 return cached[0]
-        response = request_json("embeddings/models" if family == "embedding" else "models", key)
+        response = discover_models(family, key)
         if not isinstance(response, list):
             raise Problem("invalid_response", "OpenRouter returned an invalid model catalogue.", 503)
         models = []
@@ -137,7 +150,10 @@ class OpenRouter:
             except Problem:
                 return None
 
-        models = fetch("embeddings/models" if family == "embedding" else "models")
+        try:
+            models = discover_models(family, key)
+        except Problem:
+            models = None
         benchmarks = (fetch("benchmarks?source=artificial-analysis&task_type=intelligence")
                       if key and family == "chat" and models is not None else None)
         ranks = {}
@@ -182,8 +198,9 @@ class OpenRouter:
         if models is None and cached:
             return cached[0] | {"stale": True}
         if not choices:
-            from .settings import PAPER_MODELS
+            from .settings import DEFAULT_CHAT_MODEL, DEFAULT_EMBEDDING_MODEL, PAPER_MODELS
             ids = {model for role, model in PAPER_MODELS.items() if (role == "embedding") == (family == "embedding")}
+            ids.add(DEFAULT_EMBEDDING_MODEL if family == "embedding" else DEFAULT_CHAT_MODEL)
             choices = [{"id": model, "input": None, "output": None, "context": None, "tools": None, "score": None}
                        for model in sorted(ids)]
         result = {"models": sorted(choices, key=preference), "shortlist": sorted(shortlisted),

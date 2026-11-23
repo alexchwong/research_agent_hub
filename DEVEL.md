@@ -2,18 +2,25 @@
 
 Keep research inside the native upstreams. Preserve each app’s documented entry points, settings and original outputs.
 
-Use Python 3.12.14, uv 0.13.9 and Node for JavaScript syntax checking. From the repository root on Ubuntu or macOS:
+## Quick start on Ubuntu and macOS
+
+From the repository root, with Python 3.12.14 available and Node installed for verification:
 
 ```bash
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --only-binary=:all: uv==0.13.9
-.venv/bin/uv pip sync --python .venv/bin/python --require-hashes --only-binary=:all: dev-deps.lock
-.venv/bin/python -m pytest -q -m 'not live'
-node --check rah/static/app.js
-node --check rah/static/workspace.js
+bash scripts/setup-dev.sh
+bash scripts/setup-dev.sh --verify
+./.release-test/bin/rah
 ```
 
-On Windows PowerShell, with a 3.12.14 interpreter selected:
+1. **Set up:** Prepare `.venv` with uv 0.13.9 and the locked dev tools, then build and install the wheel in a separate environment at `.release-test/current/installed-hub`. If the matching interpreter is not on `PATH`, set `RAH_DEV_PYTHON` to its absolute executable path before a fresh setup. An existing `.venv` must use Python 3.12.14. Rerun setup after changing package code to refresh the installed wheel; quit the dev hub first if it is running. Old builds are retained and can be removed when no longer in use. Setup does not start the hub or install the upstream apps.
+2. **Verify:** Run the offline pytest suite, JavaScript syntax checks, and the fixture and packaged-upstream smokes against the previously installed wheel. Verification does not rebuild the wheel, modify the manual workspace, or create shortcuts. It needs no provider credentials; the packaged smoke may need network access for uncached locked dependencies and needs a temporary directory with adequate free space (set `TMPDIR` if needed). See [Installed-package verification](#installed-package-verification) for report details.
+3. **Start:** Run the installed hub in the current terminal with data under `.release-test/manual-data`, separate from your normal RAH workspace. First launch provisions the three pinned apps and may need network access. Later launches keep current apps. To stop the hub, press **Ctrl+C** in the terminal that started it or close that console window. This can interrupt active operations. If provisioning is incomplete, retry in **App details**, or stop the dev hub and rerun the launcher. No desktop shortcut is created. Pass `--no-browser` for a headless launch.
+
+Wheel builds stage the current source, including local edits, without reusing the checkout's `build/` or egg-info directories. The builder checks that the wheel's `rah` files match the staged files before installing it. If a pre-foreground build left a detached dev hub running, use its **Quit** action before launching the new build. Do not delete `instance.lock` to get past a running hub.
+
+## Windows PowerShell
+
+Use a Python 3.12.14 interpreter and run from the repository root:
 
 ```powershell
 py -3.12 -m venv .venv
@@ -22,9 +29,10 @@ py -3.12 -m venv .venv
 .\.venv\Scripts\python.exe -m pytest -q -m 'not live'
 node --check rah/static/app.js
 node --check rah/static/workspace.js
+node --check rah/static/native_handoff.js
 ```
 
-Verify the interpreter is 3.12.14 before creating a fresh venv. These commands assume the working directory is the checkout root. The offline suite needs no credentials and blocks non-loopback networking in the test process. To regenerate the dev lock without changing the runtime pins:
+The offline suite needs no credentials and blocks non-loopback networking in the test process. To regenerate the dev lock without changing the runtime pins:
 
 ```bash
 .venv/bin/uv pip compile --universal --python-version 3.12.14 --generate-hashes --only-binary :all: --extra dev -c hub-deps.lock pyproject.toml dev-tools.in -o dev-deps.lock
@@ -55,16 +63,7 @@ This sends one synthetic chat prompt (16 output tokens max) and one synthetic em
 
 ## Installed-package verification
 
-Run from the repository root. The script creates the wheel and bootstrap files in `.release-test/bootstrap` and installs RAH into the separate test environment `.release-test/installed-hub`. The bootstrap directory must not already exist. To rebuild, move the previous `.release-test` directory aside first.
-
-```bash
-.venv/bin/python scripts/bundle_hub.py --system-python \
-  --uv "$PWD/.venv/bin/uv" \
-  --bundle "$PWD/.release-test/bootstrap" \
-  --venv "$PWD/.release-test/installed-hub"
-```
-
-On Windows PowerShell:
+On Ubuntu and macOS, run `bash scripts/setup-dev.sh --verify` after setup. On Windows PowerShell, build and install the wheel from the repository root using the following commands. The bootstrap path must be new; for a rebuild, use fresh bootstrap and venv paths or move the previous ones aside.
 
 ```powershell
 .\.venv\Scripts\python.exe scripts/bundle_hub.py --system-python `
@@ -73,21 +72,14 @@ On Windows PowerShell:
   --venv "$PWD/.release-test/installed-hub"
 ```
 
-Run the fixture and the real pinned upstream checks with the installed Python. Both are non-interactive and require no provider credentials. Add `--shortcut` only in a disposable desktop test account. The smoke removes RAH's shortcut on exit. See the [release evidence checklist](docs/releases.md) for the desktop and live checks that cannot be inferred from smoke results.
-
-```bash
-./.release-test/installed-hub/bin/python tests/smoke_setup.py --uv "$PWD/.venv/bin/uv" --report reports/setup.json
-./.release-test/installed-hub/bin/python tests/smoke_setup.py --uv "$PWD/.venv/bin/uv" --packaged --report reports/upstreams.json
-```
-
-On Windows PowerShell:
+Then run the fixture and real pinned-upstream checks with the installed Python:
 
 ```powershell
 .\.release-test\installed-hub\Scripts\python.exe tests/smoke_setup.py --uv "$PWD/.venv/Scripts/uv.exe" --report reports/setup.json
 .\.release-test\installed-hub\Scripts\python.exe tests/smoke_setup.py --uv "$PWD/.venv/Scripts/uv.exe" --packaged --report reports/upstreams.json
 ```
 
-The real test uses the standard wheel path and three installed apps. It checks native browser readiness and GPT Researcher’s HTTP and WebSocket origins. It exercises the actual pinned PaperQA2 transport with synthetic data and the pinned LDR RIS emitter. It needs network access to install locked dependencies and uses no provider credentials. Use a disk-backed temporary directory with adequate free space. The packaged smoke already runs `tests/probe_paper_transport.py` with the installed PaperQA2 interpreter. Its result is included in `reports/upstreams.json`. Reports omit exception messages and payloads; failed checks still return a nonzero exit code. See [release checklist](docs/releases.md) for live and desktop steps.
+On all platforms, the fixture smoke writes `reports/setup.json`, and the packaged smoke writes `reports/upstreams.json`. The packaged smoke verifies native browser readiness and GPT Researcher’s HTTP and WebSocket origins. It also exercises the pinned PaperQA2 transport with synthetic data and the pinned LDR RIS emitter. Reports omit exception messages and payloads; failed checks return a nonzero exit code. Add `--shortcut` to a manual smoke run only in a disposable desktop test account: the smoke removes RAH's shortcut on exit. See the [release checklist](docs/releases.md) for live and desktop steps.
 
 `scripts/prepare_candidates.py` can generate a disposable fresh per-host resolution for investigation. Standard setup uses the reviewed lock files shipped in `rah/install_assets`. Treat lock regeneration and private route qualification as separate changes.
 
@@ -110,9 +102,9 @@ On Windows PowerShell:
   --release-dir "$PWD/.release-test/release-assets"
 ```
 
-Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry on each target. One confirmation provisions the hub and all three apps. Check first launch, shortcut, restart and reinstallation with existing data.
+Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry on each target. One confirmation provisions the hub and all three apps. Check first launch, shortcut, Ctrl+C and console-close shutdown, restart and reinstallation with existing data.
 
-`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root before exercising an in-place upgrade. RAH keeps SQLite’s base schema at version 1 and applies `rah/workspace.sql` once in a transaction. Old project files keep their paths and papers keep their edit revision.
+`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root and any separate workspace before exercising an in-place upgrade. The base schema and initial workspace migration are followed by `rah/workspace_v3.sql` (SQLite `user_version=2`). Normal project paths and paper edit revisions are preserved. Unfiled chat folder relocation resumes on startup if interrupted.
 
 ## Optional maintainer diagnostic for a changed PaperQA2 route
 
@@ -122,7 +114,7 @@ This diagnostic is for maintainers investigating a materially changed route. Nor
 
    ```bash
    paperqa_data="$(mktemp -d "$PWD/.release-test/paperqa2-live.XXXXXXXX")"
-   ./.release-test/installed-hub/bin/python -m rah.cli --data-dir "$paperqa_data" \
+   ./.release-test/current/installed-hub/bin/python -I -m rah.cli --data-dir "$paperqa_data" \
      setup --uv "$PWD/.venv/bin/uv" --no-shortcut --no-browser
    ```
 
@@ -137,7 +129,7 @@ This diagnostic is for maintainers investigating a materially changed route. Nor
 2. Once the apps are installed, stop the disposable hub with its Quit command, or run `rah remove-hub --no-shortcut` with that same data directory. The latter keeps the native apps and settings. Set `OPENROUTER_API_KEY` in your environment using your normal secret entry method. Run the live check from the same shell so it uses the data directory created in step 1.
 
    ```bash
-   ./.release-test/installed-hub/bin/python scripts/live_paperqa2_dataflow.py \
+   ./.release-test/current/installed-hub/bin/python scripts/live_paperqa2_dataflow.py \
      --live --require-hub --data-dir "$paperqa_data" --report reports/paperqa2-live.json
    ```
 

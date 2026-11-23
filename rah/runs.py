@@ -3,6 +3,7 @@ from importlib import resources
 from pathlib import Path
 import io
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -60,7 +61,13 @@ class Runs:
                     shutil.rmtree(folder)
                 elif marker:
                     if marker["succeeded"]:
-                        self.collect(folder, record)
+                        try:
+                            self.collect(folder, record)
+                        except Problem as error:
+                            if error.code != "no_sources":
+                                raise
+                            if record.get("entry"):
+                                self.projects.transition(record["project"], record["entry"], ("Running",), "Failed", reason=str(error))
                     shutil.rmtree(folder)
             except (Problem, OSError, ValueError, KeyError, TypeError):
                 continue
@@ -119,6 +126,11 @@ class Runs:
         self.expire()
         with self.lock:
             return preview_id in self.previews
+
+    def has_reviews(self):
+        self.expire()
+        with self.lock:
+            return bool(self.previews)
 
     def preview(self, project, ids, question, *, entry=None, quote=""):
         config = settings.load(self.root)
@@ -206,7 +218,7 @@ class Runs:
                 shutil.copyfile(self.projects.artifact_path(row), staged)
                 if file_digest(staged) != row["sha256"]:
                     raise Problem("changed_pdf", "A selected PDF changed. Review it again.", 409)
-            job.checkpoint(final=True)
+            job.checkpoint()
             home = private_directory(child(folder, "pqa-home"))
             env = clean_env() | {
                 "OPENROUTER_API_KEY": config.values["RAH_OPENROUTER_API_KEY"], "PQA_HOME": str(home),
@@ -220,7 +232,7 @@ class Runs:
             if info["quote"]:
                 question += "\n\nUser-selected excerpt:\n" + info["quote"]
             return self.invoke(folder, venv_python(installation / "venv"), env,
-                               {"app": "pqa", "question": question, "profile": profile}, record)
+                               {"app": "pqa", "question": question, "profile": profile}, record, job=job)
         finally:
             self.clean_run(folder)
 
@@ -240,14 +252,35 @@ class Runs:
         ):
             shutil.rmtree(folder, ignore_errors=True)
 
-    def invoke(self, folder, python, env, payload, record):
+    def invoke(self, folder, python, env, payload, record, *, job=None):
         script = child(folder, "worker.py")
         atomic(script, resources.files("rah").joinpath("worker.py").read_bytes())
         write_json(child(folder, "run.json"), record)
         try:
-            result = subprocess.run([python, script], cwd=folder, env=env, input=canonical(payload),
-                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                    timeout=600 if record["app"] == "pqa" else None)
+            command = [python, script]
+            options = {"cwd": folder, "env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+            if job is None:
+                returncode = subprocess.run(command, input=canonical(payload), **options).returncode
+            else:
+                job.checkpoint()
+                with subprocess.Popen(command, stdin=subprocess.PIPE, **options) as worker:
+                    try:
+                        pending = canonical(payload)
+                        deadline = monotonic() + 600
+                        while True:
+                            job.checkpoint()
+                            try:
+                                worker.communicate(input=pending, timeout=min(0.25, max(0, deadline - monotonic())))
+                                break
+                            except subprocess.TimeoutExpired:
+                                if monotonic() >= deadline:
+                                    raise
+                                pending = None
+                    finally:
+                        if worker.poll() is None:
+                            worker.kill()
+                    returncode = worker.returncode
+                job.checkpoint(final=True)
         except subprocess.TimeoutExpired as error:
             write_json(child(folder, "collected.json"), {"failed": True})
             write_json(child(folder, "completion.json"), {"succeeded": False})
@@ -256,11 +289,21 @@ class Runs:
             write_json(child(folder, "collected.json"), {"failed": True})
             write_json(child(folder, "completion.json"), {"succeeded": False})
             raise Problem("worker_start", "The native worker could not start.", 503) from error
-        if result.returncode:
+        except Problem as error:
+            if error.code == "cancelled":
+                write_json(child(folder, "completion.json"), {"succeeded": False})
+                write_json(child(folder, "collected.json"), {"cancelled": True})
+            raise
+        if returncode:
             if (folder / "completion.json").exists():
                 write_json(child(folder, "collected.json"), {"failed": True})
             raise Problem("worker_failed", "The native worker failed. Verify provider and native setup.", 503)
-        output = self.collect(folder, record)
+        try:
+            output = self.collect(folder, record)
+        except Problem as error:
+            if error.code == "no_sources":
+                write_json(child(folder, "collected.json"), {"failed": True})
+            raise
         write_json(child(folder, "collected.json"), output)
         return output
 
@@ -277,6 +320,10 @@ class Runs:
                 raise Problem("native_output", "Expected one native Markdown report.", 503)
             path = child(outputs, files[0].name)
             with path.open("rb") as report:
+                header = report.read(128 * 1024).split(b"\n---\n", 1)
+                if len(header) == 2 and header[0].startswith(b"---\n") and re.search(rb"^sources_count: 0\s*$", header[0], re.M):
+                    raise Problem("no_sources", "No sources retrieved. No sourced report was saved. Check the search source or try a different query.", 422)
+                report.seek(0)
                 artifact = self.projects.register(record["project"], report, path.name, "report",
                                                   app="gptr", version=record["version"], run_id=folder.name, entry=record.get("entry"))
         return {"artifact_id": artifact, "submitted_files": record.get("files", [])}

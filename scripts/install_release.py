@@ -40,7 +40,15 @@ try:
                         "--only-binary", ":all:", "--no-index", "--find-links", bundle / "wheelhouse",
                         bundle / "hub.lock"], check=True)
         (runtime / "ready").touch()
-    raise SystemExit(subprocess.run([python_in(venv), "-m", "rah.cli", "--data-dir", root,
-                                     "setup", "--uv", retained_uv]).returncode)
 finally:
     lock.rmdir()
+
+# The bootstrap lock guards the runtime files, not the foreground hub session.
+command = [python_in(venv), "-I", "-m", "rah.cli", "--data-dir", root,
+           "setup", "--uv", retained_uv, "--foreground"]
+if os.name != "nt":
+    os.execv(command[0], command)
+try:
+    raise SystemExit(subprocess.run(command).returncode)
+except KeyboardInterrupt:
+    raise SystemExit(130)

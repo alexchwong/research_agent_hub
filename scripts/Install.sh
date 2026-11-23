@@ -22,4 +22,4 @@ case "$rah_reply" in y|Y|yes|YES) ;; *) exit 0 ;; esac
 rah_pin="$(cat python-version.txt)"
 ./uv --no-config python install "$rah_pin"
 rah_python="$(./uv --no-config python find --managed-python "$rah_pin")"
-"$rah_python" install_release.py "$rah_root" "$PWD/uv"
+exec "$rah_python" install_release.py "$rah_root" "$PWD/uv"

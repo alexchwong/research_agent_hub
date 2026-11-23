@@ -11,6 +11,7 @@ from time import monotonic, sleep
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
 from urllib.request import build_opener, ProxyHandler, Request
+from uuid import uuid4
 
 from rah.cli import connected, shortcut_path
 from rah.common import APPS, clean_env, venv_python
@@ -72,7 +73,10 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
             original = lock.read_bytes()
             lock.write_bytes(original + b"\n# changed")
             try:
-                assert cli_run(*setup, check=False).returncode == 1
+                result = cli_run(*setup, check=False)
+                assert result.returncode == 1, (
+                    f"Installed rah setup should exit 1 for the corrupted PaperQA2 lock; got {result.returncode}."
+                )
                 assert not (root / "apps/pqa/current.json").exists()
                 unchanged = {name: (root / "apps" / name / "current.json").read_bytes() for name in ("ldr", "gptr")}
             finally:
@@ -115,18 +119,29 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
             cli_run("setup", "--no-shortcut", "--no-browser")
             assert connected(root)["pid"] == record["pid"], "Second setup replaced the healthy hub"
         if packaged:
+            chat = api("/chats", {"title": "Smoke résumé"})["id"]
+            folder = Path(api("/projects/" + chat)["folder"])
+            assert folder == root / "chats" / chat and (folder / "files").is_dir()
             for name, expected in (("ldr", b"local deep research"), ("gptr", b"gpt researcher")):
                 try:
-                    launched = api(f"/apps/{name}/launch", {})
+                    entry = api("/workspace/requests", {"app": name, "action": "native", "chat_id": chat,
+                                "entry_id": str(uuid4()), "question": "Offline worksheet — draft only?"})
+                    launch = {"project_id": chat, "entry_id": entry["id"]}
+                    launched = api(f"/apps/{name}/launch", launch)
                     deadline = monotonic() + 135
                     while launched["state"] == "Starting" and monotonic() < deadline:
                         assert "url" not in launched
                         sleep(0.5)
                         launched = api(f"/apps/{name}/browser")
                     assert launched["state"] == "Ready", (name, launched)
+                    if not launched.get("opened"):
+                        launched = api(f"/apps/{name}/launch", launch | {"ready_generation": launched["generation"]})
+                    assert launched["prefill_prepared"]
                     with opener.open(launched["url"], timeout=10) as response:
-                        assert expected in response.read().lower()
+                        page = response.read().lower()
+                        assert expected in page and b"/_rah_handoff.js" in page
                     if name == "gptr":
+                        assert (folder / "gptr" / "outputs").is_dir()
                         assert websocket_status(launched["url"], launched["url"].rstrip("/")) == 101
                         assert websocket_status(launched["url"], "https://foreign.invalid") == 403
                         foreign = Request(launched["url"], headers={"Origin": "https://foreign.invalid"})
@@ -143,8 +158,7 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
         if not real:
             config = api("/settings")
             saved = api("/settings", {"revision": config["revision"], "changes": {
-                "RAH_NATIVE_GPTR__OPENAI_API_KEY": "synthetic-test",
-                "RAH_NATIVE_GPTR__TAVILY_API_KEY": "synthetic-test"}})
+                "RAH_NATIVE_GPTR__OPENAI_API_KEY": "synthetic-test"}})
             assert "gptr" not in saved["failures"]
             first = api("/projects", {"name": "Cross-platform setup smoke"})["id"]
             op = api(f"/projects/{first}/gptr-reports", {"question": "Public fixture", "public": True, "mode": "deep"})

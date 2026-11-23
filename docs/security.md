@@ -8,4 +8,6 @@ Private PDF approval binds the originating project and request, ordered file IDs
 
 GPT Researcher’s Classic UI runs on its own loopback origin. The deployment wrapper validates Host, requires its native Origin for WebSocket and HTTP mutations, rejects foreign browser subresources, and disables forwarded proxy headers. Its readiness route checks a per-launch token. Standalone use is local and retains the upstream browser and native credential choices.
 
+Native draft handoffs transfer only the question over loopback and use a short-lived, single-use ticket. The fragment contains the ticket, not the draft, and is cleared when the destination tab reads it. Prefill does not submit the native form. LDR result saves use its authenticated native export in the destination tab and a workspace-scoped local grant; RAH does not import LDR credentials, session cookies or database records.
+
 The PaperQA2 worker receives only the scoped OpenRouter credential for the verified profile. The reviewed profile uses one eligible provider per role and disables provider fallbacks. The report observed Azure for chat and established constrained routing for embeddings. The serving provider was unobservable in embedding responses.
