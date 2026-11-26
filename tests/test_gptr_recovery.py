@@ -1,4 +1,7 @@
 import asyncio
+import socket
+import subprocess
+from types import SimpleNamespace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 from unittest.mock import Mock
@@ -120,8 +123,10 @@ def test_launch_treats_loopback_probe_timeout_as_free_port(tmp_path, monkeypatch
     monkeypatch.setattr("rah.web.upstreams.current", Mock(return_value=install))
     monkeypatch.setattr("rah.web.upstreams.launch_spec", Mock(return_value=spec))
     monkeypatch.setattr("rah.web.upstreams.refresh_browser", Mock())
-    monkeypatch.setattr("rah.web.socket.create_connection", Mock(side_effect=refusal))
-    monkeypatch.setattr("rah.web.subprocess.Popen", popen)
+    # Patch only rah.web's view of socket/subprocess: on Windows the shared modules also run the
+    # PowerShell ACL check during create_app, which must keep using the real subprocess.Popen.
+    monkeypatch.setattr("rah.web.socket", SimpleNamespace(**{**vars(socket), "create_connection": Mock(side_effect=refusal)}))
+    monkeypatch.setattr("rah.web.subprocess", SimpleNamespace(**{**vars(subprocess), "Popen": popen}))
     hub = create_app(root, RouteBook.load(), None, "hub", "test", Mock(), lambda: "localhost").test_client()
     result = hub.post(f"/api/apps/{name}/launch", json={},
                       headers={"Authorization": "Bearer test", "Origin": "http://localhost"})
