@@ -59,18 +59,21 @@ jobs:
         run: |
           uv python install --no-bin "$RAH_CI_PYTHON"
           uv venv --managed-python --python "$RAH_CI_PYTHON" .venv
-          bin=.venv/bin
-          uv=$bin/uv
-          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
-          uv pip sync --python "$bin/python" --require-hashes --only-binary=:all: dev-deps.lock
-          "$bin/python" scripts/bundle_hub.py --uv "$uv" \
+          python=.venv/bin/python
+          uv=.venv/bin/uv
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            python=.venv/Scripts/python.exe
+            uv=.venv/Scripts/uv.exe
+          fi
+          uv pip sync --python "$python" --require-hashes --only-binary=:all: dev-deps.lock
+          "$python" scripts/bundle_hub.py --uv "$uv" \
             --bundle "$RUNNER_TEMP/rah-bootstrap" --release-dir "$RUNNER_TEMP/rah-release-candidates"
       - name: Install the release ZIP and test core setup and both native browsers
         shell: bash
         run: |
-          bin=.venv/bin
-          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; fi
-          "$bin/python" tests/smoke_release.py "$RUNNER_TEMP/rah-release-candidates" --packaged --shortcut --report reports/upstreams.json
+          python=.venv/bin/python
+          if [[ "$RUNNER_OS" == Windows ]]; then python=.venv/Scripts/python.exe; fi
+          "$python" tests/smoke_release.py "$RUNNER_TEMP/rah-release-candidates" --packaged --shortcut --report reports/upstreams.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
