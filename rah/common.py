@@ -1,3 +1,4 @@
+from base64 import b64encode
 from contextlib import contextmanager
 import hashlib
 import json
@@ -78,10 +79,7 @@ def private_directory(path):
     return path
 
 
-def verify_windows_root(path):
-    if os.name != "nt":
-        return
-    script = r"""
+_WINDOWS_ACL_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
 $a = Get-Acl -LiteralPath $env:RAH_ACL_PATH
 $u = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
@@ -90,17 +88,29 @@ if ($a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $al
 foreach ($r in $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
     if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin $allowed) { exit 3 }
 }
+[Console]::WriteLine('RAH_ACL_OK')
 """
+
+
+def verify_windows_root(path):
+    if os.name != "nt":
+        return
+    # Avoid passing multiline PowerShell source through Windows command-line quoting.
+    command = b64encode(_WINDOWS_ACL_SCRIPT.encode("utf-16le")).decode("ascii")
     try:
         result = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
             env=clean_env() | {"RAH_ACL_PATH": str(path)}, timeout=15,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired as error:
+        raise Problem("permissions", "Windows directory ACL verification timed out after 15 seconds.") from error
+    except OSError as error:
         raise Problem("permissions", "Windows could not verify the managed directory ACL.") from error
-    if result.returncode:
+    if result.returncode == 3:
         raise Problem("permissions", "The managed Windows directory has an unverified or broad ACL.")
+    if result.returncode or result.stdout.strip() != b"RAH_ACL_OK":
+        raise Problem("permissions", "Windows could not verify the managed directory ACL.")
 
 
 def prepare_root(root):
