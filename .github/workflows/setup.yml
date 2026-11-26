@@ -20,7 +20,7 @@ jobs:
         with:
           version: "0.13.9"
           enable-cache: false
-      - name: Bootstrap dev venv and run offline pytest
+      - name: Bootstrap dev venv
         shell: bash
         env:
           RAH_CI_PYTHON: "cpython@3.12.14"
@@ -30,6 +30,15 @@ jobs:
           python=.venv/bin/python
           if [[ "$RUNNER_OS" == Windows ]]; then python=.venv/Scripts/python.exe; fi
           uv pip sync --python "$python" --require-hashes --only-binary=:all: dev-deps.lock
+      - name: Verify Windows directory permissions
+        if: runner.os == 'Windows'
+        shell: bash
+        run: .venv/Scripts/python.exe -m pytest -q tests/test_windows_acl.py
+      - name: Run offline pytest and JavaScript syntax checks
+        shell: bash
+        run: |
+          python=.venv/bin/python
+          if [[ "$RUNNER_OS" == Windows ]]; then python=.venv/Scripts/python.exe; fi
           "$python" -m pytest -q -m 'not live'
           node --check rah/static/app.js
           node --check rah/static/workspace.js

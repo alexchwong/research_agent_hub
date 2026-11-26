@@ -1,4 +1,4 @@
-from base64 import b64decode
+from base64 import b64decode, b64encode
 import os
 import subprocess
 from time import monotonic
@@ -51,12 +51,27 @@ def test_acl_verifier_fails_closed(windows_acl_call, outcome, message):
 
 def _powershell_diagnostics(root):
     env = common.clean_env() | {"RAH_ACL_PATH": str(root)}
+    dotnet_acl = (
+        "$sections = [System.Security.AccessControl.AccessControlSections]::Owner -bor "
+        "[System.Security.AccessControl.AccessControlSections]::Access\n"
+        "$a = [System.IO.Directory]::GetAccessControl($env:RAH_ACL_PATH, $sections)"
+    )
+    probes = [
+        ("startup", ""),
+        ("Get-Acl", "$null = Get-Acl -LiteralPath $env:RAH_ACL_PATH"),
+        ("current user SID", "$null = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value"),
+        (".NET ACL read", dotnet_acl),
+        ("owner SID", dotnet_acl + "\n$null = $a.GetOwner([System.Security.Principal.SecurityIdentifier])"),
+        ("access-rule enumeration", dotnet_acl + "\n$null = $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])"),
+        ("full verifier", common._WINDOWS_ACL_SCRIPT),
+    ]
     details = []
-    for label, script in [("startup", "exit 0"), ("legacy multiline command", common._WINDOWS_ACL_SCRIPT)]:
+    for label, script in probes:
         start = monotonic()
         try:
+            command = b64encode(("$ErrorActionPreference = 'Stop'\n" + script).encode("utf-16le")).decode("ascii")
             result = subprocess.run(
-                ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
                 env=env, stdin=subprocess.DEVNULL, capture_output=True, timeout=15,
             )
             outcome = f"exit {result.returncode}, stdout={result.stdout[:500]!r}, stderr={result.stderr[:500]!r}"
@@ -75,6 +90,11 @@ def test_private_windows_directory_passes_and_broad_acl_is_rejected(tmp_path):
         pytest.fail(f"{error}\n{_powershell_diagnostics(root)}")
 
     # Everyone gains directory read access only in this empty pytest fixture.
-    subprocess.run(["icacls.exe", str(root), "/grant", "*S-1-1-0:(R)"], check=True, timeout=15)
+    inherited = root / "inherited"
+    inherited.mkdir()
+    common.verify_windows_root(inherited)
+    subprocess.run(["icacls.exe", str(root), "/grant", "*S-1-1-0:(OI)(CI)(R)"], check=True, timeout=15)
     with pytest.raises(common.Problem, match="broad ACL"):
         common.verify_windows_root(root)
+    with pytest.raises(common.Problem, match="broad ACL"):
+        common.verify_windows_root(inherited)
