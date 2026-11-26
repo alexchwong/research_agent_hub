@@ -1,5 +1,9 @@
 #!/bin/sh
 set -eu
+case "$#:$*" in
+  0:|1:--bootstrap-only) ;;
+  *) echo "Usage: $0 [--bootstrap-only]" >&2; exit 2 ;;
+esac
 cd "$(dirname "$0")"
 case "$(uname -s):$(uname -m)" in
   Linux:x86_64)
@@ -22,4 +26,4 @@ case "$rah_reply" in y|Y|yes|YES) ;; *) exit 0 ;; esac
 rah_pin="$(cat python-version.txt)"
 ./uv --no-config python install "$rah_pin"
 rah_python="$(./uv --no-config python find --managed-python "$rah_pin")"
-exec "$rah_python" install_release.py "$rah_root" "$PWD/uv"
+exec "$rah_python" install_release.py "$rah_root" "$PWD/uv" "$@"

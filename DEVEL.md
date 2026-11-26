@@ -63,6 +63,8 @@ This sends one synthetic chat prompt (16 output tokens max) and one synthetic em
 
 ## Installed-package verification
 
+GitHub Actions uses uv 0.13.9 to provision CPython 3.12.14 on all three runner platforms. Both workflows build a release ZIP, verify its checksum, and run the shipped launcher in a disposable data root. The launcher runs its normal checks and installs the hub, but stops before starting a foreground desktop session. The smoke checks then use the installed hub and retained uv to run `rah setup`: the fixture check injects an intentional lock failure, and the packaged check uses the same three app routes as a normal install. The developer wheel route shares the release installer's locked wheelhouse sync; it keeps its separate development layout.
+
 On Ubuntu and macOS, run `bash scripts/setup-dev.sh --verify` after setup. On Windows PowerShell, build and install the wheel from the repository root using the following commands. The bootstrap path must be new; for a rebuild, use fresh bootstrap and venv paths or move the previous ones aside.
 
 ```powershell

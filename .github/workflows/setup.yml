@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   setup:
-    name: Installed-wheel setup (${{ matrix.runner }})
+    name: Release ZIP setup (${{ matrix.runner }})
     strategy:
       fail-fast: false
       matrix:
@@ -16,43 +16,40 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v6
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: "3.12.14"
+          version: "0.13.9"
+          enable-cache: false
       - name: Bootstrap dev venv and run offline pytest
         shell: bash
+        env:
+          RAH_CI_PYTHON: "cpython@3.12.14"
         run: |
-          python -m venv .venv
+          uv python install --no-bin "$RAH_CI_PYTHON"
+          uv venv --managed-python --python "$RAH_CI_PYTHON" .venv
           bin=.venv/bin
-          uv=$bin/uv
-          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
-          "$bin/python" -m pip install --only-binary=:all: uv==0.13.9
-          "$uv" pip sync --python "$bin/python" --require-hashes --only-binary=:all: dev-deps.lock
+          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; fi
+          uv pip sync --python "$bin/python" --require-hashes --only-binary=:all: dev-deps.lock
           "$bin/python" -m pytest -q -m 'not live'
           node --check rah/static/app.js
           node --check rah/static/workspace.js
           node --check rah/static/native_handoff.js
-      - name: Build and bootstrap the wheel into a fresh environment
+      - name: Build the release candidate ZIP
         shell: bash
         run: |
           bin=.venv/bin
           uv=$bin/uv
           if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; uv=$bin/uv.exe; fi
-          "$bin/python" scripts/bundle_hub.py --system-python \
+          "$bin/python" scripts/bundle_hub.py \
             --uv "$uv" \
-            --bundle "$RUNNER_TEMP/rah-bootstrap" --venv "$RUNNER_TEMP/rah-installed" \
+            --bundle "$RUNNER_TEMP/rah-bootstrap" \
             --release-dir "$RUNNER_TEMP/rah-release-candidates"
-      - name: Test installed setup, retained native entry points, and failure isolation
+      - name: Install the release ZIP and test failure isolation and retained native entry points
         shell: bash
         run: |
-          if [[ "$RUNNER_OS" == Windows ]]; then
-            rah_python="$RUNNER_TEMP/rah-installed/Scripts/python.exe"
-            uv=.venv/Scripts/uv.exe
-          else
-            rah_python="$RUNNER_TEMP/rah-installed/bin/python"
-            uv=.venv/bin/uv
-          fi
-          "$rah_python" tests/smoke_setup.py --uv "$uv" --shortcut --report reports/setup.json
+          bin=.venv/bin
+          if [[ "$RUNNER_OS" == Windows ]]; then bin=.venv/Scripts; fi
+          "$bin/python" tests/smoke_release.py "$RUNNER_TEMP/rah-release-candidates" --shortcut --report reports/setup.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:

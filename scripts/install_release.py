@@ -1,4 +1,5 @@
 """Run from an integrity-checked release bundle with its pinned Python."""
+import argparse
 import hashlib
 import os
 from pathlib import Path
@@ -7,11 +8,16 @@ import shutil
 import subprocess
 import sys
 
-from bundle_hub import python_in
+from bundle_hub import python_in, sync_wheelhouse
 
 bundle = Path(__file__).resolve().parent
-root = Path(sys.argv[1]).resolve()
-uv = Path(sys.argv[2]).resolve()
+parser = argparse.ArgumentParser()
+parser.add_argument("root", type=Path)
+parser.add_argument("uv", type=Path)
+parser.add_argument("--bootstrap-only", action="store_true", help="Install the hub without starting setup.")
+args = parser.parse_args()
+root = args.root.resolve()
+uv = args.uv.resolve()
 if platform.python_version() != (bundle / "python-version.txt").read_text().strip():
     raise SystemExit("The bootstrap Python does not match the release.")
 if subprocess.check_output([uv, "--version"], text=True).split()[1] != "0.13.9":
@@ -36,12 +42,13 @@ try:
         os.replace(candidate, retained_uv)
     if not (runtime / "ready").is_file() or not python_in(venv).is_file():
         subprocess.run([retained_uv, "venv", "--clear", "--python", sys.executable, venv], check=True)
-        subprocess.run([retained_uv, "pip", "sync", "--python", python_in(venv), "--require-hashes",
-                        "--only-binary", ":all:", "--no-index", "--find-links", bundle / "wheelhouse",
-                        bundle / "hub.lock"], check=True)
+        sync_wheelhouse(retained_uv, bundle, venv)
         (runtime / "ready").touch()
 finally:
     lock.rmdir()
+
+if args.bootstrap_only:
+    raise SystemExit(0)
 
 # The bootstrap lock guards the runtime files, not the foreground hub session.
 command = [python_in(venv), "-I", "-m", "rah.cli", "--data-dir", root,

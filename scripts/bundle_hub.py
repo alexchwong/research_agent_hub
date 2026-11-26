@@ -121,6 +121,11 @@ def release_zip(uv, target, output):
     archive.with_suffix(".zip.sha256").write_text(f"{checksum}  {archive.name}\n", encoding="utf-8")
 
 
+def sync_wheelhouse(uv, target, venv):
+    run(uv, "pip", "sync", "--python", python_in(venv), "--require-hashes", "--only-binary", ":all:",
+        "--no-index", "--find-links", target / "wheelhouse", target / "hub.lock", cwd=target)
+
+
 def install(uv, target, venv, system_python):
     version = (target / "python-version.txt").read_text(encoding="utf-8").strip()
     if system_python:
@@ -129,8 +134,7 @@ def install(uv, target, venv, system_python):
         run(uv, "python", "install", version)
         selector = ["--managed-python", "--python", version]
     run(uv, "venv", *(["--python", *selector] if system_python else selector), venv)
-    run(uv, "pip", "sync", "--python", python_in(venv), "--require-hashes", "--only-binary", ":all:",
-        "--no-index", "--find-links", target / "wheelhouse", target / "hub.lock")
+    sync_wheelhouse(uv, target, venv)
 
 
 if __name__ == "__main__":
