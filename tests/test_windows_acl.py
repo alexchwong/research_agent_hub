@@ -63,9 +63,7 @@ def _powershell_diagnostics(root):
         (".NET ACL read", dotnet_acl),
         ("owner SID", dotnet_acl + "\n$null = $a.GetOwner([System.Security.Principal.SecurityIdentifier])"),
         ("access-rule enumeration", dotnet_acl + "\n$null = $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])"),
-        ("full verifier with .NET ACL read", common._WINDOWS_ACL_SCRIPT.replace(
-            "$a = Get-Acl -LiteralPath $env:RAH_ACL_PATH", dotnet_acl,
-        )),
+        ("full verifier", common._WINDOWS_ACL_SCRIPT),
     ]
     details = []
     for label, script in probes:

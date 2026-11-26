@@ -81,10 +81,14 @@ def private_directory(path):
 
 _WINDOWS_ACL_SCRIPT = r"""
 $ErrorActionPreference = 'Stop'
-$a = Get-Acl -LiteralPath $env:RAH_ACL_PATH
+$sections = [System.Security.AccessControl.AccessControlSections]::Owner -bor `
+    [System.Security.AccessControl.AccessControlSections]::Access
+$a = [System.IO.Directory]::GetAccessControl($env:RAH_ACL_PATH, $sections)
 $u = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 $allowed = @($u, 'S-1-5-18', 'S-1-5-32-544')
 if ($a.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -notin $allowed) { exit 3 }
+# CPython mkdir(0700) grants Owner Rights. This SID applies only to the verified owner.
+$allowed += 'S-1-3-4'
 foreach ($r in $a.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
     if ($r.AccessControlType -eq 'Allow' -and $r.IdentityReference.Value -notin $allowed) { exit 3 }
 }
