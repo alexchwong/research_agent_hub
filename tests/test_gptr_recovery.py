@@ -104,3 +104,27 @@ def test_gptr_chat_distinguishes_missing_models_and_search_credentials():
     env["FAST_LLM"] = "openai:fixture/model"
     with pytest.raises(Problem, match="Fast role uses OpenAI"):
         gptr_recipients(env, "shared-key")
+
+@pytest.mark.parametrize("refusal", [ConnectionRefusedError(111, "Connection refused"), TimeoutError("timed out")],
+                         ids=["posix_refusal", "windows_refusal"])
+@pytest.mark.parametrize("name", ["ldr", "gptr"])
+def test_launch_treats_loopback_probe_timeout_as_free_port(tmp_path, monkeypatch, refusal, name):
+    # Windows reports a refused loopback connect only after SYN retries, so the 0.5 s probe times out.
+    root = prepare_root(tmp_path.resolve() / "data")
+    install = tmp_path / "install"
+    install.mkdir()
+    port = upstreams.LDR_PORT if name == "ldr" else upstreams.GPTR_PORT
+    spec = upstreams.LaunchSpec(["python", f"{name}_browser.py"], install, {}, f"http://127.0.0.1:{port}/")
+    popen = Mock()
+    popen.return_value.poll.return_value = None
+    monkeypatch.setattr("rah.web.upstreams.current", Mock(return_value=install))
+    monkeypatch.setattr("rah.web.upstreams.launch_spec", Mock(return_value=spec))
+    monkeypatch.setattr("rah.web.upstreams.refresh_browser", Mock())
+    monkeypatch.setattr("rah.web.socket.create_connection", Mock(side_effect=refusal))
+    monkeypatch.setattr("rah.web.subprocess.Popen", popen)
+    hub = create_app(root, RouteBook.load(), None, "hub", "test", Mock(), lambda: "localhost").test_client()
+    result = hub.post(f"/api/apps/{name}/launch", json={},
+                      headers={"Authorization": "Bearer test", "Origin": "http://localhost"})
+    assert result.status_code == 200, result.get_json()
+    assert result.json["state"] == "Starting"
+    popen.assert_called_once()

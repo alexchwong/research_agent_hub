@@ -580,7 +580,9 @@ def create_app(root, book, uv, identity, token, stop, address):
                     with socket.create_connection(("127.0.0.1", browsers[name]), timeout=0.5):
                         raise Problem("port_in_use", "The native port is in use by a listener RAH could not verify. "
                                       "Close it separately or reopen its existing app.", 409)
-                except ConnectionRefusedError:
+                except (ConnectionRefusedError, TimeoutError):
+                    # Windows retries a refused loopback SYN for ~2 s, so the probe times out instead of
+                    # being refused. A live loopback listener completes the handshake immediately.
                     pass
                 record = {"revision": config.revision, "identity": identity_token, "generation": token_hex(16),
                           "handoff_hub": hub_origin, "profile_version": settings.PROFILE_VERSIONS[name],
