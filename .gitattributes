@@ -1,0 +1,2 @@
+# Packaged dependency locks are verified byte-for-byte against routes.json.
+/rah/install_assets/*.lock text eol=lf
