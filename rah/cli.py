@@ -1,4 +1,5 @@
 import argparse
+from base64 import b64encode
 import hashlib
 import hmac
 import json
@@ -170,7 +171,8 @@ def register_shortcut(root):
     path.parent.mkdir(parents=True, exist_ok=True)
     if os.name == "nt":
         script = """
-$shell = New-Object -ComObject WScript.Shell
+$ErrorActionPreference = 'Stop'
+$shell = [Activator]::CreateInstance([Type]::GetTypeFromProgID('WScript.Shell', $true))
 $link = $shell.CreateShortcut($env:RAH_SHORTCUT)
 $link.TargetPath = $env:RAH_TARGET
 $link.Arguments = $env:RAH_ARGUMENTS
@@ -180,8 +182,16 @@ $link.Save()
         env = clean_env() | {"RAH_SHORTCUT": str(path), "RAH_TARGET": sys.executable,
                              "RAH_ARGUMENTS": subprocess.list2cmdline(
                                  ["-I", "-m", "rah.cli", "--data-dir", str(root), "open", "--foreground"])}
-        subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
-                       env=env, check=True, timeout=15)
+        command = b64encode(script.encode("utf-16le")).decode("ascii")
+        try:
+            subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand", command],
+                           env=env, stdin=subprocess.DEVNULL, check=True, timeout=15)
+        except subprocess.TimeoutExpired as error:
+            raise Problem("shortcut", "Windows shortcut creation timed out after 15 seconds.") from error
+        except (OSError, subprocess.CalledProcessError) as error:
+            raise Problem("shortcut", "Windows could not create the hub shortcut.") from error
+        if not path.is_file():
+            raise Problem("shortcut", "Windows did not save the hub shortcut.")
     elif sys.platform == "darwin":
         import plistlib
         bundle = path / "Contents"
