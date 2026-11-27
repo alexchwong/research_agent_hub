@@ -1,5 +1,4 @@
 import io
-from importlib import resources
 import platform
 from pathlib import Path
 import tempfile
@@ -7,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from rah import settings
+from rah import pqa_profiles, settings
 from rah.common import Problem, atomic, digest, prepare_root, private_directory, venv_python, write_json
 from rah.installer import RouteBook
 from rah.jobs import Jobs
@@ -84,8 +83,7 @@ class HubTest(unittest.TestCase):
 
     def test_verified_route_binds_roles_and_selected_bytes(self):
         config_path = self.root / "hub/config/.env"
-        config = ("RAH_OPENROUTER_API_KEY=synthetic\nRAH_OPENROUTER_CHAT_MODEL=fixture/chat\n"
-                  "RAH_OPENROUTER_EMBEDDING_MODEL=fixture/embed\nRAH_PQA_OPENAI_API_KEY=ignored\n")
+        config = "RAH_OPENROUTER_API_KEY=synthetic\nRAH_PQA_OPENAI_API_KEY=ignored\nRAH_NATIVE_PQA__OPENAI_API_KEY=native\n"
         atomic(config_path, config.encode())
         install_id = str(uuid4())
         app = private_directory(self.root / "apps/pqa")
@@ -97,65 +95,64 @@ class HubTest(unittest.TestCase):
         lock_hash = digest(lock.read_bytes())
         write_json(app / "current.json", {"install_id": install_id, "lock_sha256": lock_hash, "upstream_version": "fixture"})
         route = {"lock_sha256": lock_hash, "lock_path": lock.name, "upstream_version": "fixture",
-                 "python_build": platform.python_version(), "paper_profile": settings.PAPER_PROFILE}
-        evidence = {"status": "verified", "lock_sha256": [lock_hash], "reference": "test fixture",
-                    "worker_sha256": digest(resources.files("rah").joinpath("worker.py").read_bytes()),
-                    "python": platform.python_version(), "upstream_version": "fixture",
-                    "policy": "single-provider-no-fallback",
-                    "roles": {role: {"provider": "Azure",
-                                     "model": "fixture/embed" if role == "embedding" else "fixture/chat",
-                                     "endpoint": "https://openrouter.ai/api/v1/" +
-                                                 ("embeddings" if role == "embedding" else "chat/completions")}
-                              for role in PAPER_ROLES}}
+                 "python_build": platform.python_version()}
         book = Mock()
         book.route.return_value = route
-        book.document = {"paper_profiles": {settings.PAPER_PROFILE: evidence}}
         book.directory = self.root
         book.custom = False
-        book.capabilities.return_value = [f"PQA_{role.upper()}:openrouter" for role in PAPER_ROLES]
         projects = Projects(self.root)
         project = projects.create("Transfers")
         chosen = projects.register(project, io.BytesIO(b"%PDF-1.7\nselected"), "chosen.pdf", "pdf", 0)
-        excluded = projects.register(project, io.BytesIO(b"%PDF-1.7\nexcluded"), "excluded.pdf", "pdf")
-        projects.save_papers(project, 0, [{"title": item, "state": "supplied", "pdf_artifact_id": item}
-                                          for item in (chosen, excluded)])
+        projects.register(project, io.BytesIO(b"%PDF-1.7\nexcluded"), "excluded.pdf", "pdf")
         runs = Runs(self.root, book, projects, Jobs())
+        with self.assertRaises(Problem) as unavailable:
+            runs.preview(project, [chosen], "Question")
+        self.assertEqual(unavailable.exception.code, "profile_unavailable")
+        with self.assertRaises(Problem) as retired:
+            runs.paper_route(settings.load(self.root), "openrouter-text-v1")
+        self.assertEqual(retired.exception.code, "retired_profile")
 
-        settings.install_projection(self.root, "pqa", settings.resolve(settings.load(self.root), "pqa", book.capabilities("pqa")))
-        declined = runs.preview(project, [chosen], "Question")
-        self.assertFalse((runs.folder(declined["preview_id"]) / "corpus").exists())
-        self.assertIsNone(runs.approve(project, declined["preview_id"], declined["binding"], False))
-        self.assertFalse(runs.folder(declined["preview_id"]).exists())
-        with self.assertRaises(Problem):
-            runs.approve(project, declined["preview_id"], declined["binding"], True)
-
-        stale = runs.preview(project, [chosen], "Question")
-        pending = runs.previews[stale["preview_id"]]
-        atomic(config_path, config.replace("KEY=synthetic", "KEY=replaced").encode())
-        with self.assertRaises(Problem) as failure:
-            runs.run_paper(pending, Mock())
-        self.assertEqual(failure.exception.code, "settings_stale")
-        self.assertFalse(pending.directory.exists())
-
-        atomic(config_path, (config + "# unrelated edit\n").encode())
-        preview = runs.preview(project, [chosen], "Question")
-        self.assertEqual(preview["files"], ["chosen.pdf"])
-        self.assertEqual({item["provider"] for item in preview["profile"]["destinations"]},
-                         {"Azure"})
-
-        def verify(folder, interpreter, env, payload, record, *, job):
-            self.assertEqual(interpreter, python)
-            self.assertEqual(env["OPENROUTER_API_KEY"], "synthetic")
-            self.assertNotIn("OPENAI_API_KEY", env)
-            self.assertEqual(payload["profile"], preview["profile"])
-            self.assertEqual([path.read_bytes() for path in (folder / "corpus").iterdir()], [b"%PDF-1.7\nselected"])
-            return {"verified": True}
-
-        with patch.object(runs, "invoke", side_effect=verify), patch.object(runs.jobs, "start") as start:
-            runs.approve(project, preview["preview_id"], preview["binding"], True)
-            self.assertEqual(start.call_args.args[1](Mock()), {"verified": True})
+        host = pqa_profiles.host_identity()
+        providers = {role: "Fixture-" + role for role in PAPER_ROLES}
+        enabled = dict(pqa_profiles.REGISTRY["pqa-standard-v1"]) | {"enabled": ({
+            **host, "upstream_version": "fixture", "lock_sha256": lock_hash, "worker_sha256": pqa_profiles.worker_digest(),
+            "providers": providers, "evidence_sha256": "e" * 64},)}
+        with patch.object(pqa_profiles, "REGISTRY", dict(pqa_profiles.REGISTRY) | {"pqa-standard-v1": enabled}):
+            declined = runs.preview(project, [chosen], "Question")
+            self.assertFalse((runs.folder(declined["preview_id"]) / "corpus").exists())
+            self.assertIsNone(runs.approve(project, declined["preview_id"], declined["binding"], False))
+            self.assertFalse(runs.folder(declined["preview_id"]).exists())
             with self.assertRaises(Problem):
+                runs.approve(project, declined["preview_id"], declined["binding"], True)
+
+            stale = runs.preview(project, [chosen], "Question")
+            pending = runs.previews[stale["preview_id"]]
+            atomic(config_path, config.replace("KEY=synthetic", "KEY=replaced").encode())
+            with self.assertRaises(Problem) as failure:
+                runs.run_paper(pending, Mock())
+            self.assertEqual(failure.exception.code, "stale_preview")
+            self.assertFalse(pending.directory.exists())
+
+            atomic(config_path, (config + "# unrelated edit\n").encode())
+            preview = runs.preview(project, [chosen], "Question")
+            self.assertEqual(preview["files"], ["chosen.pdf"])
+            self.assertEqual({item["provider"] for item in preview["profile"]["destinations"]}, set(providers.values()))
+            self.assertEqual({item["model"] for item in preview["profile"]["destinations"]},
+                             {"anthropic/claude-haiku-5.5", "openai/gpt-6.1-terra", "openai/text-embedding-3-small"})
+
+            def verify(folder, interpreter, env, payload, record, *, job):
+                self.assertEqual(interpreter, python)
+                self.assertEqual(env["OPENROUTER_API_KEY"], "synthetic")
+                self.assertNotIn("OPENAI_API_KEY", env)
+                self.assertEqual(payload["profile"], preview["profile"])
+                self.assertEqual([path.read_bytes() for path in (folder / "corpus").iterdir()], [b"%PDF-1.7\nselected"])
+                return {"verified": True}
+
+            with patch.object(runs, "invoke", side_effect=verify), patch.object(runs.jobs, "start") as start:
                 runs.approve(project, preview["preview_id"], preview["binding"], True)
+                self.assertEqual(start.call_args.args[1](Mock()), {"verified": True})
+                with self.assertRaises(Problem):
+                    runs.approve(project, preview["preview_id"], preview["binding"], True)
 
     def test_embedding_catalogue_is_cached_separately(self):
         provider = OpenRouter(lambda: None)

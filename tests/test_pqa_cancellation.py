@@ -14,7 +14,7 @@ from rah.runs import Runs
 def test_cancel_reaps_owned_paper_worker(tmp_path, monkeypatch):
     class Script:
         def joinpath(self, name):
-            assert name == "worker.py"
+            assert name in ("worker.py", "pqa_profile_worker.py")
             return self
 
         def read_bytes(self):

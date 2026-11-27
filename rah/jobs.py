@@ -13,6 +13,7 @@ class Job:
     state: str = "Queued"
     result: dict | None = None
     reason: str | None = None
+    code: str | None = None
     detail: dict = field(default_factory=dict)
     cancellable: bool = True
     requested: bool = False
@@ -71,6 +72,7 @@ class Jobs:
         except Problem as error:
             with job.lock:
                 job.reason = str(error)
+                job.code = error.code
                 job.state = "Cancelled" if error.code == "cancelled" else "Failed"
         except Exception:
             with job.lock:

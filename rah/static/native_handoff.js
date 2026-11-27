@@ -24,15 +24,16 @@
     }
     const ticket = sessionStorage.getItem(key);
     if (!ticket) return;
-    if (field && (fragment || sessionStorage.getItem(key + "-received") !== ticket)) {
+    // Take a staged ticket once per tab. A reopened handoff carries no draft; it only enables saving a result.
+    if (fragment || (field && sessionStorage.getItem(key + "-received") !== ticket)) {
       const response = await request("take", ticket);
       if (!response.ok) {
         sessionStorage.removeItem(key);
-        notice("RAH could not fill this field. Copy the draft from RAH and paste it here.", field);
+        if (field) notice("RAH could not fill this field. Copy the draft from RAH and paste it here.", field);
         return;
       }
       const {question, export: canExport} = await response.json();
-      if (question) {
+      if (question && field) {
         // Don't auto-submit or overwrite a question the user has already typed.
         if (field.value && field.value !== question) {
           const box = notice("A RAH draft is ready. ", field);
@@ -44,8 +45,10 @@
         } else {
           field.value = question;
           field.dispatchEvent(new Event("input", {bubbles: true}));
-          notice("Draft from RAH. Review it before starting research.", field);
+          notice("Draft from RAH. Review it and your LDR model and search settings before starting research.", field);
         }
+      } else if (!question && canExport) {
+        notice("RAH handoff ready. Open the finished result from LDR history to save it to RAH. Research is not resubmitted.");
       }
       sessionStorage.setItem(key + "-received", ticket);
       if (!canExport) sessionStorage.removeItem(key);
@@ -54,8 +57,8 @@
       const match = /\/(?:results|details)\/([0-9a-f-]{36})\/?$/i.exec(location.pathname);
       if (!match) return;
       const id = match[1];
-      const box = notice("RAH: ");
-      for (const [fmt, text] of [["md", "Save report to chat/project"], ["ris", "Save RIS to chat/project"]]) {
+      const box = notice("RAH · result " + id + ": ");
+      for (const [fmt, text] of [["md", "Save report to RAH"], ["ris", "Save RIS to RAH"]]) {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = text;
@@ -70,13 +73,13 @@
             if (!native.ok) throw Error();
             const payload = fmt === "ris" ? await native.blob() : (await native.json()).content;
             if (!payload) throw Error();
-            const saved = await request("export", ticket, payload, {"X-RAH-Format": fmt});
+            const saved = await request("export", ticket, payload, {"X-RAH-Format": fmt, "X-RAH-Result": id});
             if (!saved.ok) throw Error();
             button.textContent = "Saved to RAH";
           } catch {
             button.textContent = text;
             button.disabled = false;
-            notice("Could not save to RAH. Download the native export and attach it in RAH instead.", box);
+            notice("Could not save to RAH. Download the native export and use Import LDR export in RAH instead.", box);
           }
         };
         box.append(button, " ");

@@ -13,8 +13,8 @@ The GPT Researcher source archive retains its licence and vendor notices. Review
 | App | Intended OpenRouter mapping | Qualification |
 |---|---|---|
 | LDR | `LDR_LLM_PROVIDER`, `LDR_LLM_MODEL` and the documented scoped OpenRouter key field | Native pinned provider inspected. Live saved override, release to native, academic search and role precedence pending. |
-| GPT Researcher | `FAST_LLM`, `SMART_LLM`, `STRATEGIC_LLM` and `EMBEDDING` through `openrouter:<model-id>` | Pin inspected. Classic native HTML and origin controls tested locally. Live roles and native modes pending. Configure its selected search retriever separately where needed. |
-| PaperQA2 | `llm`, `summary_llm`, `agent.agent_llm` and `embedding` via the same shared key | Installed pinned clients serialized the OpenRouter URLs, key and exact provider restriction for all four roles, with a native agent tool request. The synthetic intercept verifies client request shape. The installed report observed Azure chat generations. Embedding endpoint constraints and rejection were observed, and serving-provider identity was unavailable in embedding responses. |
+| GPT Researcher | `FAST_LLM`, `SMART_LLM`, `STRATEGIC_LLM` and `EMBEDDING` through `openrouter:<model-id>` | Pin inspected. Classic native HTML and origin controls tested locally. The guided survey projection was verified on the installed CLI with fake transports (see below). Live roles and native modes pending. |
+| PaperQA2 | Standalone: `llm`, `summary_llm`, `agent.agent_llm` and `embedding` via the native settings or RAH role values. Managed: the per-quality routes below. | Installed pinned clients serialized the OpenRouter URLs, key and exact provider restriction for all four roles and all three candidate routes, with a native agent tool request. Live qualification of the new routes is pending (P6). |
 
 LiteLLM’s chat transport flattens the provider field from `extra_body`. Its pinned embedding path forwards the provider field supplied as an embedding keyword. Leaving the embedding setting under `extra_body` sent a nested field. The original resolution of `fhlmi 1.11.0` also failed before sending PaperQA2 tool requests due to the callback signature used with Aviary. The lock pins the newest inspected compatible release, `0.46.2`, without changing the upstream app versions.
 
@@ -28,8 +28,48 @@ The structured import uses the pinned RIS export. Arbitrary JSON files can still
 
 The LDR and GPT Researcher locks include small platform-independent wheels built from the exact source archives and SHA-256 values listed under `built_sources` in the installer manifest. The packaged wheelhouses carry those wheels so deployment can remain binary-only. The locks record the bundled wheel hashes and do not change package versions.
 
-## Reviewed PaperQA2 profile
+## Guided research routes (purpose pipeline refactor)
 
-The packaged `openrouter-text-v1` profile covers OpenRouter chat for answer, summary and agent with `openai/gpt-4.1-mini`, and embeddings with `openai/text-embedding-3-small`. Both endpoints restrict routing to Azure and disable fallbacks. The worker uses local text-only PDF parsing and a fresh corpus and index. It disables image parsing and document metadata lookups.
+### GPT Researcher survey and downstream reports
 
-The Ubuntu and Apple silicon locks share a digest. Windows uses the same dependency versions with Windows-only `colorama` and `pywin32` additions. The reviewed parser and transport distributions share their universal wheel hashes across the locks. See [release evidence](releases.md) for digests, the report scope and separate desktop acceptance.
+The guided route uses the packaged CLI (`597a99e2…`) through the installed app interpreter with `--report_type research_report|deep --report_source web --no-pdf --no-docx -- <question>`. The installed `--help` lists both modes. The projection is built from the checked saved GPT Researcher profile but keeps only its single supported retriever (`pubmed_central`, local `searx` with its URL, or `tavily` with its key) and the shared OpenRouter key. `CONFIG_PATH`, legacy base/model overrides, other credentials and multi-retriever values are rejected for guided runs and remain available to Classic. Image generation and MCP are disabled.
+
+The P0 probe ran the installed CLI in-process with fake OpenRouter chat, embedding and PubMed Central responses at the installed transport boundary (`httpx` and the pinned OpenAI SDK's `httpx2`, plus `requests`), with real sockets blocked:
+
+| Observation | Result |
+| --- | --- |
+| Effective settings | `MAX_ITERATIONS=1`, `MAX_SEARCH_RESULTS_PER_QUERY=3`, `MAX_SCRAPER_WORKERS=2`, `BROWSE_CHUNK_MAX_LENGTH=2048`, `TOTAL_WORDS=400`, `CURATE_SOURCES=False`, token limits 1,024/2,048/1,024/512, `LLM_KWARGS={"max_tokens":2048,"max_retries":0}`, image generation off, MCP disabled. |
+| Chat requests | Four requests, all `deepseek/deepseek-v4.1-flash-1017`, each with `max_completion_tokens: 2048` on the wire. Native temperatures 0.15–0.4 were sent; no reasoning effort was sent. |
+| Retriever | Three PubMed Central searches with `retmax=3` (the original question plus generated queries) and full-text fetches. The query count is a target, not a ceiling. |
+| Embeddings | None for this route: the keyword context filter applies without a jev key. |
+| Native retries | GPT Researcher's own wrapper retries a failed chat request up to 10 times; the provider adapter override (`max_retries: 0`) is separate. RAH adds no retry. |
+| Tokenizer | The native cost estimator loads `o200k_base` from `openaipublic.blob.core.windows.net` on first use. Guided runs share a private `TIKTOKEN_CACHE_DIR` under `apps/gptr/native/` and disclose this destination. |
+| Output | One Markdown report in `outputs/` with YAML frontmatter including `sources_count`. |
+
+Downstream Rapid and comparison reports use `research_report`; Deep uses `deep`. Each uses the selected quality's FAST/SMART/STRATEGIC/EMBEDDING mapping for that run only.
+
+### Scope Gate
+
+One non-streaming OpenRouter Chat Completions request per explicit round to `anthropic/claude-haiku-5.5` with `max_completion_tokens=2400`, a 45-second deadline and a 128 KiB response limit. No tools, temperature, reasoning effort, fallbacks or retries. The response must be the exact `questions` shape; anything else opens the editable generic questionnaire.
+
+### Local Deep Research native handoff
+
+The guided route is the native workflow: RAH prefills the approved prompt in a new LDR tab (never auto-submitted), and the tab's authenticated Markdown and RIS exports reach the waiting stage through a grant bound to the scope, chat, step attempt, route fingerprint, LDR process generation and an 8-hour expiry. The wrapper now forwards the native result UUID; the first export binds the attempt to it and later exports must match.
+
+P0 results: the pinned RIS emitter produced titled records with PubMed and PMC URLs (pass). `quick_summary()` returns a summary, findings and a sources list but no typed RIS citations, and needs a provider snapshot to run; it fails the typed-citation criterion, so the programmatic SDK route is not shipped and no `rah/ldr_pipeline.py` exists. `OpenAccessDOIDownloader.download_with_result()` returns content and a skip reason only, without identifier/version, origin URL or licence evidence, attempts landing pages and labels missing open-access copies as paywalls; RAH does not use it.
+
+### Open-access acquisition
+
+The fixed fallback uses the PMC ID Converter (`/tools/idconv/api/v1/articles/`, DOI to PMCID only, with `tool=research-agent-hub` and a configured maintainer contact) and the PMC Cloud Service bucket (`pmc-oa-opendata.s3.amazonaws.com`: ListObjectsV2 for versions, per-version JSON metadata, then the metadata's `pdf_url`). Accepted records are in the PMC Open Access Subset with a Creative Commons or CC0 `license_code` and a same-bucket PDF; `TDM`, retracted, unknown-licence and identity mismatches stay in manual review. MD5 from the metadata URL is checked and SHA-256 is stored. Text parseability is checked with the installed `paperqa_pypdf.parse_pdf_to_pages` in a separate, network-blocked process; the P0 check rejected an empty-text page, an invalid file and an encrypted PDF.
+
+## Managed PaperQA2 routes
+
+The `openrouter-text-v1` profile (GPT-4.1 Mini via Azure) is retired from RAH-managed use. Its historical answers and BibTeX sidecars stay readable, and its earlier evidence remains attached to that route in [releases.md](releases.md).
+
+| Quality | Route | Summary / agent / answer | Embeddings | Status |
+| --- | --- | --- | --- | --- |
+| Budget | `pqa-budget-v1` | Haiku / Haiku / Haiku | `openai/text-embedding-3-small` | Disabled candidate |
+| Standard | `pqa-standard-v1` | Haiku / Terra / Terra | `openai/text-embedding-3-small` | Disabled candidate; must qualify on each release platform |
+| Premium | `pqa-premium-v1` | Sonnet / Sonnet / Sonnet | `openai/text-embedding-3-small` | Disabled candidate |
+
+Each role uses the official OpenRouter Chat Completions or Embeddings endpoint, exactly one provider and `allow_fallbacks: false`. The worker refuses any request whose URL, model or provider differs from the approved tuple, any redirect and any model list. The installed pinned clients (paper-qa 2026.8.12, fhlmi 0.46.2, fhaviary 0.37.0, LiteLLM 1.84.1, pypdf 7.1.1) serialized the restriction for all three routes in the offline transport probe, including agent tool requests and embeddings. Provider tuples are chosen and approved during P6; a route becomes available only when its evidenced platform identity is added to `rah/pqa_profiles.py`. The PaperQA2 lock files are unchanged.

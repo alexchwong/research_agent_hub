@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from importlib import resources
 import io
 import json
 import os
+import re
 
 from dotenv.parser import parse_stream
 
@@ -15,17 +15,13 @@ ROLES = {
     "gptr": {"FAST": "FAST_LLM", "SMART": "SMART_LLM", "STRATEGIC": "STRATEGIC_LLM", "EMBEDDING": "EMBEDDING"},
     "pqa": {"ANSWER": "llm", "SUMMARY": "summary_llm", "AGENT": "agent.agent_llm", "EMBEDDING": "embedding"},
 }
-PAPER_PROFILE = "openrouter-text-v1"
-PAPER_MODELS = {role: entry["model"] for role, entry in json.loads(
-    resources.files("rah").joinpath("install_assets/routes.json").read_text(encoding="utf-8")
-)["paper_profiles"][PAPER_PROFILE]["roles"].items()}
-PAPER_SUGGESTIONS = {f"RAH_PQA_{role.upper()}": f"openrouter:{model}"
-                     for role, model in PAPER_MODELS.items()}
 DEFAULT_CHAT_MODEL = "deepseek/deepseek-v4.1-flash-1017"
-DEFAULT_EMBEDDING_MODEL = PAPER_MODELS["embedding"]
+DEFAULT_EMBEDDING_MODEL = "openai/text-embedding-3-small"
 GPTR_PROFILE_VERSION = 4
 PROFILE_VERSIONS = {"gptr": GPTR_PROFILE_VERSION, "ldr": 3}
 COMMON = {"RAH_OPENROUTER_API_KEY", "RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL", "RAH_PQA_SETTINGS_FILE"}
+GUIDED = {"RAH_OA_AUTO", "RAH_OA_PMC_CONTACT_EMAIL", "RAH_OPENURL_BASE"}
+EMAIL = re.compile(r"[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9.-]{1,190}\.[A-Za-z]{2,24}")
 NATIVE = {
     "ldr": {
         "LDR_SEARCH_TOOL", "LDR_SEARCH_ENGINE_WEB_OPENALEX_API_KEY", "LDR_SEARCH_ENGINE_WEB_BRAVE_API_KEY",
@@ -38,7 +34,7 @@ NATIVE = {
     "pqa": {"OPENAI_API_KEY", "CROSSREF_API_KEY", "SEMANTIC_SCHOLAR_API_KEY", "ANTHROPIC_API_KEY"},
 }
 LEGACY_GPTR = {"LLM_PROVIDER", "FAST_LLM_MODEL", "SMART_LLM_MODEL", "OPENAI_BASE_URL", "CONFIG_PATH"}
-KEYS = COMMON | {f"RAH_{app.upper()}_{role}" for app, roles in ROLES.items() for role in roles} | {
+KEYS = COMMON | GUIDED | {f"RAH_{app.upper()}_{role}" for app, roles in ROLES.items() for role in roles} | {
     f"RAH_NATIVE_{app.upper()}__{item}" for app, options in NATIVE.items() for item in options
 }
 
@@ -78,13 +74,28 @@ def load(root):
 
 
 def seed(root):
+    """Create a private, empty hub .env. RAH no longer seeds managed PaperQA2 model values."""
     path = child(root, "hub", "config", ".env")
     try:
-        with os.fdopen(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w", encoding="utf-8") as handle:
-            for name, value in PAPER_SUGGESTIONS.items():
-                handle.write(f"{name}={value}\n")
+        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
     except FileExistsError:
         pass
+
+
+def guided(config):
+    """Validated guided-research settings: OA opt-in (default off), PMC contact and OpenURL base."""
+    values = config.values
+    auto = values.get("RAH_OA_AUTO", "")
+    contact = values.get("RAH_OA_PMC_CONTACT_EMAIL", "")
+    if auto not in ("", "true", "false"):
+        raise Problem("invalid_settings", "RAH_OA_AUTO must be true or false.", 409)
+    if contact and not EMAIL.fullmatch(contact):
+        raise Problem("invalid_settings", "Enter a valid PMC contact email address.", 409)
+    base = values.get("RAH_OPENURL_BASE", "")
+    if base:
+        from .oa import openurl_base
+        openurl_base(base)
+    return {"oa_auto": auto == "true", "contact": contact or None, "openurl": base or None}
 
 
 def checked_projection(root, app, config, *, effective=None, upgrade=None):
@@ -204,6 +215,7 @@ def update(root, revision, changes, clear):
         parts.append("\n")
     parts.extend(f"{key}={json.dumps(value, ensure_ascii=False)}\n" for key, value in replacements.items())
     candidate = parse("".join(parts))
+    guided(candidate)
     atomic(child(root, "hub", "config", ".env"), candidate.text.encode())
     return candidate
 
@@ -246,7 +258,6 @@ def public_config(root, config, capabilities):
             states[app] = {"projection": str(error) if isinstance(error, Problem) else "Apply settings"}
     return {
         "revision": config.revision,
-        "paper_suggestions": PAPER_SUGGESTIONS,
         "model_defaults": {"chat": DEFAULT_CHAT_MODEL, "embedding": DEFAULT_EMBEDDING_MODEL},
         "search_defaults": search_sources.DEFAULTS,
         "search_presets": search_sources.LABELS,

@@ -16,3 +16,16 @@ This assessment applies the product plan’s B1–B8 requirements to the final w
 ## 0.1.0 workspace application
 
 The installer’s affirmative confirmation or explicit CLI setup is the installation decision for the three mandatory apps. Optional software requires a separate explicit decision. The workspace stores app actions and native artifacts locally. Each managed PDF handoff requires approval for the specific inputs and verified recipients. The implementer records boundary compliance in the [release audit](releases.md).
+
+## Purpose pipeline refactor (B1–B8 trace)
+
+| Rule | Amendment and implementation trace |
+|---|---|
+| **B1 · No agentic harness** | One prompted survey in sealed GPT Researcher mode per guided run, a questionnaire-only Scope Gate with at most one user-requested second round, deterministic continuation of five user-selected fixed recipes (`rah/pipelines.py`), and exact-identifier open-access transport (`rah/oa.py`). The Gate cannot plan, browse, use tools, pick apps, choose answers or decide next actions; RAH validates its output shape and the user answers. Planning, relevance, synthesis and tool choice stay upstream. |
+| **B2 · Independent upstreams** | Native LDR handoff with prefill and authenticated export; the SDK route was not adopted after P0. The pinned downloader failed its contract, so a narrow identifier-only PMC adapter is used. No fork, patched package or reproduced research library. Native history and standalone launch are unchanged. |
+| **B3 · Native choice** | Exactly six curated models across three guided qualities (`rah/research_profiles.py`). Classic apps, advanced settings and native modes stay separate and are never overwritten by guided runs. |
+| **B4 · Three core apps** | The same three installs, pins and locks. No new dependency. |
+| **B5 · Honest settings** | The central private `.env` adds only the open-access opt-in, PMC contact and OpenURL base. Standard is the guided default on fresh and upgraded installs. Per-run projections and route fingerprints bind each approval to its scope; native processes keep their own settings and LDR overrides are shown as unobserved and attested by the user. |
+| **B6 · Monitor costs** | Advertised OpenRouter prices from the cached catalogue, native cost estimates and directly observed Scope Gate usage where returned, plus shared-key Usage. No ceilings or billing claims; query counts are targets. |
+| **B7 · Private data control** | Open-access lookups send only exact public identifiers when opted in; private-origin identifiers need per-destination approval. Every PaperQA2 run reviews the actual files, question and per-role providers. Manual acquisition and explicit subset selection remain. |
+| **B8 · Release discipline** | Transactional schema upgrade with a verified backup, shipped worker digest and disabled-candidate gate, separated P0–P5 and P6 evidence, a changed-path ZIP and no commit, push or release. |

@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
 import io
-import platform
 import re
 import shutil
 import subprocess
@@ -11,17 +10,11 @@ from threading import Lock
 from time import monotonic
 from uuid import UUID, uuid4
 
-from . import installer, settings
+from . import pqa_profiles, settings
 from .common import Problem, atomic, canonical, child, clean_env, digest, file_digest, private_directory, read_json, venv_python, write_json
 
 
-PAPER_ROLES = {
-    "answer": "Question, cited excerpts and answer context",
-    "summary": "Selected paper passages and citation metadata",
-    "agent": "Question, tool context and evidence excerpts",
-    "embedding": "Text chunks and query text",
-}
-OPENROUTER_BASE = "https://openrouter.ai/api/v1/"
+PAPER_ROLES = pqa_profiles.PAPER_ROLES
 
 
 @dataclass
@@ -40,6 +33,7 @@ class Runs:
         self.projects = projects
         self.jobs = jobs
         self.previews = {}
+        self.guided = None
         self.lock = Lock()
         self.recover()
         self.projects.interrupt()
@@ -72,39 +66,11 @@ class Runs:
             except (Problem, OSError, ValueError, KeyError, TypeError):
                 continue
 
-    def paper_route(self, config):
-        route = self.book.route("pqa")
-        key = (route or {}).get("paper_profile")
-        evidence = self.book.document.get("paper_profiles", {}).get(key, {})
-        if (not route or self.book.custom or route.get("qualification_only")
-                or key != settings.PAPER_PROFILE or evidence.get("status") != "verified"
-                or route["lock_sha256"] not in evidence["lock_sha256"]):
-            raise Problem("unverified_profile", "The installed package has no reviewed PaperQA2 route. Use the standalone app.", 503)
-        worker = resources.files("rah").joinpath("worker.py").read_bytes()
-        install = installer.install_location(self.root, "pqa")
-        if (evidence["worker_sha256"] != digest(worker)
-                or evidence["python"] != route["python_build"] or evidence["python"] != platform.python_version()
-                or evidence["upstream_version"] != route["upstream_version"]
-                or evidence["policy"] != "single-provider-no-fallback"
-                or not install or install[0].get("upstream_version") != route["upstream_version"]
-                or install[0].get("lock_sha256") != route["lock_sha256"]
-                or file_digest(child(self.book.directory, route["lock_path"])) != route["lock_sha256"]):
-            raise Problem("unverified_profile", "Repair PaperQA2 at the reviewed pin or use the standalone app.", 503)
-        location = install[1]
-        projection = settings.resolve(config, "pqa", self.book.capabilities("pqa"))
-        stored = settings.checked_projection(self.root, "pqa", config, effective=projection)
-        destinations = []
-        for role, data in PAPER_ROLES.items():
-            recipient = evidence["roles"][role]
-            if (stored["models"].get(role) != {"provider": "openrouter", "model": recipient["model"]}
-                    or recipient["provider"] != "Azure"
-                    or recipient["endpoint"] != OPENROUTER_BASE + ("embeddings" if role == "embedding" else "chat/completions")):
-                raise Problem("unverified_role", f"Use recommended PaperQA2 settings for {role}, or open the standalone app.", 409)
-            destinations.append(recipient | {"role": role, "service": "OpenRouter", "data": data})
-        profile = {"id": key, "parser": "Local text-only PDF parsing",
-                   "evidence": evidence["reference"], "policy": evidence["policy"],
-                   "identity": digest(canonical(evidence)), "destinations": destinations,
-                   "python": evidence["python"], "upstream_version": evidence["upstream_version"]}
+    def paper_route(self, config, quality="standard"):
+        """Resolve an enabled managed PaperQA2 route. Native model overrides never select a managed route."""
+        route, location, profile = pqa_profiles.resolve(self.root, self.book, quality)
+        if not config.values.get("RAH_OPENROUTER_API_KEY"):
+            raise Problem("needs_credential", "Add the shared OpenRouter key before a managed PDF transfer.", 409)
         return route, location, profile
 
     def expire(self):
@@ -113,9 +79,9 @@ class Runs:
             for key in stale:
                 shutil.rmtree(self.previews.pop(key).directory, ignore_errors=True)
 
-    def availability(self):
+    def availability(self, quality="standard"):
         try:
-            self.paper_route(settings.load(self.root))
+            self.paper_route(settings.load(self.root), quality)
         except Problem as error:
             return {"available": False, "reason": str(error), "code": error.code}
         except OSError:
@@ -132,9 +98,9 @@ class Runs:
         with self.lock:
             return bool(self.previews)
 
-    def preview(self, project, ids, question, *, entry=None, quote=""):
+    def preview(self, project, ids, question, *, entry=None, quote="", quality="standard", guided=None):
         config = settings.load(self.root)
-        route, location, profile = self.paper_route(config)
+        route, location, profile = self.paper_route(config, quality)
         rows = self.projects.selected_pdfs(project, ids)
         preview_id = str(uuid4())
         folder = private_directory(self.folder(preview_id))
@@ -144,11 +110,19 @@ class Runs:
                     raise Problem("changed_pdf", "A PDF changed. Attach the current version before continuing.", 409)
             binding = {"project": project, "entry": entry, "credential": digest(config.values["RAH_OPENROUTER_API_KEY"].encode()),
                        "question": question, "quote": quote, "install": location.name, "lock": route["lock_sha256"],
-                       "files": [[row["id"], row["original_name"], row["sha256"]] for row in rows], "profile": profile}
+                       "files": [[row["id"], row["original_name"], row["sha256"]] for row in rows], "profile": profile,
+                       "quality": quality, "guided": guided, "worker": pqa_profiles.worker_digest()}
             preview = Preview(folder, binding, rows, monotonic() + 900, digest(canonical(binding)))
             self.expire()
             with self.lock:
-                if entry:
+                if entry and guided:
+                    row = self.projects.entry(project, entry)
+                    if self.guided:
+                        self.guided.review_opened(guided, preview_id)
+                    if prior := self.previews.pop(row["preview_id"] or "", None):
+                        shutil.rmtree(prior.directory, ignore_errors=True)
+                    self.projects.set_preview(project, entry, preview_id)
+                elif entry:
                     row = self.projects.entry(project, entry)
                     self.projects.transition(project, entry, ("Preparing", "Awaiting approval"), "Awaiting approval",
                                              input_ids=ids, preview_id=preview_id, reason=None)
@@ -159,7 +133,8 @@ class Runs:
             shutil.rmtree(folder, ignore_errors=True)
             raise
         return {"preview_id": preview_id, "binding": preview.digest, "profile": profile, "question": question,
-                "quote": quote, "files": [row["original_name"] for row in rows], "reindex": len(rows)}
+                "quote": quote, "files": [row["original_name"] for row in rows], "reindex": len(rows),
+                "sizes": [row["size_bytes"] for row in rows], "quality": quality}
 
     def observe_request(self, project, entry, *, run_id=None, allowed=("Preparing",)):
         if not entry:
@@ -182,6 +157,11 @@ class Runs:
             entry = preview.binding["entry"]
             if entry and self.projects.entry(project, entry)["preview_id"] != preview_id:
                 raise Problem("stale_preview", "The preview changed. Review it again.", 409)
+            guided = preview.binding.get("guided")
+            if guided and self.guided:
+                operation = self.guided.review_decided(guided, preview, approve)
+                self.previews.pop(preview_id)
+                return operation
             if approve:
                 callbacks = self.observe_request(project, entry, run_id=preview_id, allowed=("Awaiting approval",))
                 mark_done = callbacks.get("finished")
@@ -204,12 +184,13 @@ class Runs:
         folder = preview.directory
         try:
             config = settings.load(self.root)
-            route, installation, profile = self.paper_route(config)
+            route, installation, profile = self.paper_route(config, info.get("quality", "standard"))
             selected = self.projects.selected_pdfs(info["project"], [row[0] for row in info["files"]])
             if ([[row["id"], row["original_name"], row["sha256"]] for row in selected] != info["files"]
                     or digest(config.values["RAH_OPENROUTER_API_KEY"].encode()) != info["credential"]
                     or route["lock_sha256"] != info["lock"]
                     or installation.name != info["install"] or info["profile"] != profile
+                    or info.get("worker") != pqa_profiles.worker_digest()
                     or digest(canonical(info)) != preview.digest):
                 raise Problem("stale_preview", "The PDF route or settings changed. Review the selection again.", 409)
             corpus = private_directory(child(folder, "corpus"))
@@ -227,7 +208,9 @@ class Runs:
                 "PYTHON_DOTENV_DISABLED": "1", "NO_PROXY": "*",
             }
             record = {"app": "pqa", "project": info["project"], "version": route["upstream_version"],
-                      "entry": info["entry"], "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"]} for row in preview.rows]}
+                      "entry": info["entry"], "guided": info.get("guided"),
+                      "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"],
+                                 "storage": row["storage_name"]} for row in preview.rows]}
             question = info["question"]
             if info["quote"]:
                 question += "\n\nUser-selected excerpt:\n" + info["quote"]
@@ -253,8 +236,9 @@ class Runs:
             shutil.rmtree(folder, ignore_errors=True)
 
     def invoke(self, folder, python, env, payload, record, *, job=None):
-        script = child(folder, "worker.py")
-        atomic(script, resources.files("rah").joinpath("worker.py").read_bytes())
+        name = "pqa_profile_worker.py" if payload.get("app") == "pqa" else "worker.py"
+        script = child(folder, name)
+        atomic(script, resources.files("rah").joinpath(name).read_bytes())
         write_json(child(folder, "run.json"), record)
         try:
             command = [python, script]
@@ -310,6 +294,10 @@ class Runs:
     def collect(self, folder, record):
         if record["app"] == "pqa":
             result = read_json(child(folder, "result.json"))
+            if record.get("guided"):
+                if not self.guided:
+                    raise Problem("guided_unavailable", "The guided controller is not running.", 503)
+                return self.guided.paper_result(record, result, folder.name)
             artifact = self.projects.register(record["project"], io.BytesIO(result["answer"].encode()),
                                               "PaperQA2 answer.md", "answer", app="pqa", version=record["version"],
                                               run_id=folder.name, bib=result.get("bib"), entry=record.get("entry"))

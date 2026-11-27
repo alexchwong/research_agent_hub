@@ -179,7 +179,7 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
             pqa = venv_python(root / "apps/pqa/versions" / installed["pqa"]["install_id"] / "venv")
             project_root = Path(__file__).resolve().parents[1]
             subprocess.run([pqa, project_root / "tests/probe_paper_transport.py",
-                            "--worker", project_root / "rah/worker.py"], env=clean_env(), timeout=120, check=True)
+                            "--worker", project_root / "rah/pqa_profile_worker.py"], env=clean_env(), timeout=120, check=True)
             ldr = venv_python(root / "apps/ldr/versions" / installed["ldr"]["install_id"] / "venv")
             export = subprocess.check_output([ldr, "-c",
                 "from local_deep_research.exporters.ris_exporter import RISExporter; "

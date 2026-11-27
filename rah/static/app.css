@@ -128,6 +128,22 @@ dialog::backdrop { background: #12282591; }
 dialog blockquote, .turn blockquote, .chips blockquote { margin: .65rem 0; padding: .5rem .8rem; border-left: .18rem solid #92b4a1; white-space: pre-wrap; overflow-wrap: anywhere; }
 .dialog-actions { justify-content: flex-end; margin-top: 1rem; }
 [hidden] { display: none !important; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.link-button { border-color: transparent; background: transparent; color: #125d53; text-decoration: underline; font-size: .8rem; }
+.guided-tools { align-items: flex-end; }
+.quality-control label { display: block; }
+.guided-run { padding: .9rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+.stage-card { margin: .55rem 0 .55rem 1.1rem; padding: .7rem .85rem; border: 1px solid var(--line); border-radius: .75rem; background: #fff; }
+.stage-card .facts { display: grid; grid-template-columns: max-content 1fr; gap: .1rem .8rem; margin: .4rem 0; font-size: .85rem; }
+.stage-card .facts dd { margin: 0; }
+.stage-card fieldset { border: 1px solid var(--line); border-radius: .6rem; margin: .5rem 0; }
+.stage-card legend { font-weight: 650; padding: 0 .3rem; }
+.stage-outputs .sub-actions span { font-size: .85rem; color: var(--muted); }
+.paper-row { padding: .45rem 0; border-top: 1px solid var(--line); }
+.paper-row p { margin: .15rem 0; font-size: .85rem; }
+.comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .6rem; }
+.comparison .stage-card { margin-left: 0; }
+@media (max-width: 860px) { .comparison { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) {
   .shell { grid-template-columns: minmax(0, 1fr); }
   #sidebar { position: absolute; inset: 3.65rem auto 0 0; z-index: 5; width: min(84vw, 16rem); box-shadow: .45rem .2rem 1.6rem #102b2328; }
@@ -136,4 +152,10 @@ dialog blockquote, .turn blockquote, .chips blockquote { margin: .65rem 0; paddi
   #breadcrumbs button, #breadcrumbs > span { display: none; }
   .composer { width: calc(100% - 1rem); }
   .welcome { margin-top: 10vh; }
+  .guided-tools .quality-control { order: -1; flex-basis: 100%; }
+  .guided-tools .quality-control select { width: 100%; max-width: none; }
+  .stage-card { margin-left: 0; }
 }
+
+.model-table { border-collapse: collapse; font-size: .82rem; margin: .5rem 0; }
+.model-table th, .model-table td { border: 1px solid var(--line); padding: .3rem .5rem; text-align: left; overflow-wrap: anywhere; }

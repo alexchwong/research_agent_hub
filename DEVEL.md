@@ -30,6 +30,7 @@ py -3.12 -m venv .venv
 node --check rah/static/app.js
 node --check rah/static/workspace.js
 node --check rah/static/native_handoff.js
+node --check rah/static/guided.js
 ```
 
 The offline suite needs no credentials and blocks non-loopback networking in the test process. To regenerate the dev lock without changing the runtime pins:
@@ -81,7 +82,7 @@ Then run the fixture and real pinned-upstream checks with the installed Python:
 .\.release-test\installed-hub\Scripts\python.exe tests/smoke_setup.py --uv "$PWD/.venv/Scripts/uv.exe" --packaged --report reports/upstreams.json
 ```
 
-On all platforms, the fixture smoke writes `reports/setup.json`, and the packaged smoke writes `reports/upstreams.json`. The packaged smoke verifies native browser readiness and GPT Researcher’s HTTP and WebSocket origins. It also exercises the pinned PaperQA2 transport with synthetic data and the pinned LDR RIS emitter. Reports omit exception messages and payloads; failed checks return a nonzero exit code. Add `--shortcut` to a manual smoke run only in a disposable desktop test account: the smoke removes RAH's shortcut on exit. See the [release checklist](docs/releases.md) for live and desktop steps.
+On all platforms, the fixture smoke writes `reports/setup.json`, and the packaged smoke writes `reports/upstreams.json`. The packaged smoke verifies native browser readiness and GPT Researcher’s HTTP and WebSocket origins. It also exercises the pinned PaperQA2 transport with synthetic data and the pinned LDR RIS emitter. Reports omit exception messages and payloads; failed checks return a nonzero exit code. The packaged smoke runs the managed PaperQA2 transport probe against `rah/pqa_profile_worker.py`. Add `--shortcut` to a manual smoke run only in a disposable desktop test account: the smoke removes RAH's shortcut on exit. See the [release checklist](docs/releases.md) for live and desktop steps.
 
 `scripts/prepare_candidates.py` can generate a disposable fresh per-host resolution for investigation. Standard setup uses the reviewed lock files shipped in `rah/install_assets`. Treat lock regeneration and private route qualification as separate changes.
 
@@ -106,42 +107,43 @@ On Windows PowerShell:
 
 Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry on each target. One confirmation provisions the hub and all three apps. Check first launch, shortcut, Ctrl+C and console-close shutdown, restart and reinstallation with existing data.
 
-`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root and any separate workspace before exercising an in-place upgrade. The base schema and initial workspace migration are followed by `rah/workspace_v3.sql` (SQLite `user_version=2`). Normal project paths and paper edit revisions are preserved. Unfiled chat folder relocation resumes on startup if interrupted.
+`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root and any separate workspace before exercising an in-place upgrade. The base schema and initial workspace migration are followed by `rah/workspace_v3.sql` (SQLite `user_version=2`) and `rah/workspace_schema_3.sql` (`user_version=3`). Normal project paths and paper edit revisions are preserved. See [Workspace schema 3 upgrade and downgrade](#workspace-schema-3-upgrade-and-downgrade). Unfiled chat folder relocation resumes on startup if interrupted.
 
-## Optional maintainer diagnostic for a changed PaperQA2 route
+## Workspace schema 3 upgrade and downgrade
 
-This diagnostic is for maintainers investigating a materially changed route. Normal setup and use rely on the packaged profile and its existing live evidence. Use the installed hub from the verification section above, Python 3.12.14 and an authorised OpenRouter test key. Each setup command below creates a fresh RAH data directory under `.release-test`. The script writes test model settings and creates a synthetic project there. Use a test key without prompt logging or external trace export. The script sends a small synthetic corpus and probes to OpenRouter and may incur charges. It never uses your research files.
+Startup checks the stored SQLite `user_version` before touching workspace files. A newer version is refused. The chain runs `schema.sql`, `workspace.sql`, `workspace_v3.sql` (`user_version=2`) and then `rah/workspace_schema_3.sql` (`user_version=3`). Before schema 3, RAH holds a reserved write lock, writes a backup through the SQLite backup API to `hub/backups/state-pre-v3-<timestamp>.sqlite3`, runs `integrity_check` on it and records its version and SHA-256 beside it. The rebuild runs with foreign keys off inside one `BEGIN IMMEDIATE` transaction and copies rows by column. It checks row counts, preserved IDs, `foreign_key_check` and `integrity_check` before committing, then checks again on reopen. Any mismatch rolls back and stops startup with the backup location. No file or folder moves.
 
-1. From the repository root, create the disposable data directory and provision the core apps in one setup command. Omit `--no-shortcut` for a separate desktop-shortcut acceptance exercise.
+To downgrade: stop the hub, keep a copy of the current data root (schema 3 changes made after the backup cannot be represented in schema 2), then replace `hub/state.sqlite3` with the pre-v3 backup and restore the workspace files from the same point in time. Do not run older code against an upgraded database.
 
-   ```bash
-   paperqa_data="$(mktemp -d "$PWD/.release-test/paperqa2-live.XXXXXXXX")"
-   ./.release-test/current/installed-hub/bin/python -I -m rah.cli --data-dir "$paperqa_data" \
-     setup --uv "$PWD/.venv/bin/uv" --no-shortcut --no-browser
-   ```
+## Purpose pipeline verification
 
-   On Windows PowerShell:
+### P0 probes against installed pins
 
-   ```powershell
-   $paperqaData = Join-Path "$PWD/.release-test" ("paperqa2-live-" + [guid]::NewGuid().ToString("N"))
-   .\.release-test\installed-hub\Scripts\python.exe -m rah.cli --data-dir "$paperqaData" `
-     setup --uv "$PWD/.venv/Scripts/uv.exe" --no-shortcut --no-browser
-   ```
+These run offline with the installed native environments and write JSON reports. They intercept traffic at the installed package transports and block real sockets.
 
-2. Once the apps are installed, stop the disposable hub with its Quit command, or run `rah remove-hub --no-shortcut` with that same data directory. The latter keeps the native apps and settings. Set `OPENROUTER_API_KEY` in your environment using your normal secret entry method. Run the live check from the same shell so it uses the data directory created in step 1.
+```bash
+# GPT Researcher guided survey route: effective settings and observed request bodies.
+.venv/bin/python -c "import json; from rah import gptr_pipeline; print(json.dumps(gptr_pipeline.guided_values({'RETRIEVER': 'pubmed_central'}, 'synthetic-key', 'survey', 'standard') | {'PATH': '/usr/bin:/bin', 'LITELLM_LOCAL_MODEL_COST_MAP': 'True'}))" > /tmp/survey-env.json
+"$GPTR_VENV/bin/python" tests/probe_gptr_survey.py --source "$GPTR_INSTALL/source" --env /tmp/survey-env.json --report reports/p0-gptr.json
+# Managed PaperQA2 candidate routes through the installed pinned clients.
+(cd tests && "$PQA_VENV/bin/python" probe_paper_transport.py --worker ../rah/pqa_profile_worker.py --route pqa-standard-v1)
+# LDR RIS emitter, open-access downloader contract and programmatic quick_summary feasibility.
+(cd tests && "$LDR_VENV/bin/python" probe_ldr_feasibility.py --report ../reports/p0-ldr.json)
+```
 
-   ```bash
-   ./.release-test/current/installed-hub/bin/python scripts/live_paperqa2_dataflow.py \
-     --live --require-hub --data-dir "$paperqa_data" --report reports/paperqa2-live.json
-   ```
+`$GPTR_INSTALL`, `$GPTR_VENV`, `$PQA_VENV` and `$LDR_VENV` are the active `apps/<app>/versions/<install-id>` directory and its `venv` in a disposable data root. The offline pytest suite covers P1–P5 with fake transports and a fake GPT Researcher CLI.
 
-   On Windows PowerShell:
+### P6 live qualification
 
-   ```powershell
-   .\.release-test\installed-hub\Scripts\python.exe scripts/live_paperqa2_dataflow.py `
-     --live --require-hub --data-dir "$paperqaData" --report reports/paperqa2-live.json
-   ```
+P6 is one owner-authorised campaign. Run it with the installed hub's Python after the offline gates pass. Put the key in your shell with your normal secret entry method:
 
-3. Inspect only `reports/paperqa2-live.json` for review. Exit `0` means PASS, `1` means FAIL, and `2` means INCONCLUSIVE for the observed checks. To repeat the check, create a fresh data directory. The installed-hub diagnostic uses the actual packaged profile and records the API error message on a failed hub request.
+```bash
+export OPENROUTER_API_KEY=sk-or-v1-...
+./.release-test/current/installed-hub/bin/python scripts/live_rah_refactor.py --profile all --output reports/rah-live.json
+```
 
-Without `--require-hub`, the command diagnoses the native transport and may use fallback test settings. That result does not qualify the installed hub. The single report covers Python-process observation and limits. Release review separately records any independent host capture and the desktop workflow evidence in [docs/releases.md](docs/releases.md).
+On Windows use `.\.release-test\installed-hub\Scripts\python.exe` and `$env:OPENROUTER_API_KEY`. The runner provisions a temporary data root with the retained `uv` (pass `--uv` if it is not on `PATH`) and never reads your real data root. It prompts once before public calls, then for each PaperQA2 route's exact provider tuple and synthetic corpus, including a decline probe. Optional inputs: `RAH_LIVE_GPTR_RETRIEVER`, `RAH_LIVE_TAVILY_API_KEY` or `RAH_LIVE_SEARX_URL` for search; `RAH_OA_PMC_CONTACT_EMAIL` for DOI conversion; `RAH_LIVE_OA_PMCID` for a known open-access PMCID; and `RAH_LIVE_PQA_<PROFILE>_<ROLE>_PROVIDER` to propose a provider instead of the first catalogued endpoint. Use `--profile budget|standard|premium` for a targeted repeat and `--keep` to inspect the disposable root.
+
+The report (`schema_version` 1) lists every check with status, model and provider where known, a redacted diagnostic and remediation. Exit `0` means every requested mandatory managed check passed, `1` means an automated check failed and `2` means a mandatory check was skipped or not approved. Outstanding manual checks (LDR native discovery on a desktop and the three-host matrix) are always printed.
+
+A passing `pqa_route` check includes an `enable_entry`. A maintainer enables that route only after owner approval by adding the entry to the route's `enabled` tuple in `rah/pqa_profiles.py`. The offline suite then proves the shipped entry matches the packaged worker digest, lock and Python identity; any change to those requires fresh qualification.

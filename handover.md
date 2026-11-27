@@ -15,3 +15,17 @@ Start with CI on the release candidate. Use the [release audit](docs/releases.md
 The [workspace audit](docs/releases.md#010-workspace-audit) records installed-wheel setup, native browser startup, failure isolation and workspace checks on Debian. It does not replace target desktop acceptance.
 
 The [reviewed PaperQA2 evidence](docs/releases.md#reused-paperqa2-live-evidence) applies to the unchanged packaged route. Successful embedding responses did not identify the serving provider. Do not repeat qualification for the unchanged route; review it if the worker, endpoint, provider policy or compatible dependencies change. Each managed transfer still requires explicit approval.
+# Purpose pipeline refactor handover (unreleased)
+
+The refactor is **offline complete** against baseline `b3b5df45…` (see [releases.md](docs/releases.md#purpose-pipeline-refactor-unreleased)). It is not live qualified. Package metadata stays at 0.1.0; the release number is the owner's to assign. The 0.1.0 items above remain open and separate.
+
+- [ ] **Run the P6 campaign** on each supported host with authorised credentials, then review `reports/rah-live.json`:
+
+  ```bash
+  export OPENROUTER_API_KEY=sk-or-v1-...
+  ./.release-test/current/installed-hub/bin/python scripts/live_rah_refactor.py --profile all --output reports/rah-live.json
+  ```
+
+- [ ] **Qualify Standard PaperQA2 on every release platform.** Approve each provider tuple at the prompt. Enable a passing route only after owner approval by adding its report `enable_entry` to `rah/pqa_profiles.py`, then rerun the offline suite. Budget and Premium may stay unavailable where they lack evidence.
+- [ ] **Run the packaged smoke with the real pins** on Ubuntu, macOS and Windows CI hosts.
+- [ ] **Desktop checks**: the guided walkthrough on Windows 11 x64 (including process-tree termination), Apple silicon macOS 14+ and Ubuntu x64; the native LDR literature flow with authenticated RIS/Markdown export, **Reopen LDR handoff** after a restart and native history.

@@ -18,7 +18,7 @@ function projectLabel(project) { return workspace?.projects.find(item => item.id
 function destination() { return locationState.project || locationState.chat; }
 function draft() {
   const key = locationState.chat || "new:" + destination();
-  if (!drafts.has(key)) drafts.set(key, {app: "gptr", question: "", quote: "", pdfs: [], files: [], mode: "research_report"});
+  if (!drafts.has(key)) drafts.set(key, {app: "gptr", question: "", quote: "", pdfs: [], files: [], mode: "guided", reportMode: "research_report"});
   return drafts.get(key);
 }
 
@@ -182,13 +182,16 @@ function paperReview(entry, info) {
   const {dialog, act, show} = modal("Review PaperQA2 transfer");
   const list = element("ul");
   list.append(...info.files.map(name => element("li", name)));
-  dialog.append(element("p", info.files.length + (info.files.length === 1 ? " PDF" : " PDFs") + " · PaperQA2 → OpenRouter → Azure"),
-    list, element("p", "PaperQA2 parses these PDFs locally and sends extracted text, question and excerpts, and citation details for analysis and embeddings. Azure is required by the routing policy. The embedding response does not independently identify the serving provider. Charges may apply."),
+  const providers = [...new Set(info.profile.destinations.map(row => row.provider))].join(", ");
+  dialog.append(element("p", info.files.length + (info.files.length === 1 ? " PDF" : " PDFs") + " · PaperQA2 → OpenRouter → " + providers
+    + (info.quality ? " · " + info.quality[0].toUpperCase() + info.quality.slice(1) + " quality" : "")),
+    list, element("p", "PaperQA2 parses these PDFs locally and sends extracted text, question and excerpts, and citation details for analysis and embeddings. "
+      + "Each role is restricted to one provider with fallbacks disabled. A response that omits its serving provider is recorded as unobserved. Charges may apply."),
     element("p", info.question));
   if (info.quote) dialog.append(element("blockquote", info.quote));
   const details = element("details");
-  details.append(element("summary", "Models and endpoints"), ...info.profile.destinations.map(row =>
-    element("p", row.role + " · " + row.model + " · " + row.endpoint)));
+  details.append(element("summary", "Models, providers and endpoints"), ...info.profile.destinations.map(row =>
+    element("p", row.role + " · " + row.model + " · " + row.provider + " only · " + row.endpoint + " · " + row.data)));
   dialog.append(details, element("p", "By approving, you confirm the key excludes this run from prompt logging or additional trace exports."),
     external("OpenRouter privacy settings (ZDR optional)", "https://openrouter.ai/settings/privacy"));
   async function decide(approve) {
@@ -377,6 +380,7 @@ function fileControl(parent, label, multiple, extensions, action) {
 
 function setApp(current, app) {
   current.app = app;
+  current.mode = "classic";
   const {chat} = locationState;
   if (chat) api(projectPath(destination()) + "/chats/" + chat, {app}).catch(error => say(error.message));
 }
@@ -391,6 +395,7 @@ function renderComposer() {
   const active = conversation?.entries.find(entry => entry.action === "managed" &&
     ["Preparing", "Awaiting approval", "Running"].includes(entry.state));
   composer.replaceChildren();
+  if (current.mode !== "classic") return renderGuidedComposer(current);
   const toolbar = element("div");
   toolbar.className = "composer-tools";
   const apps = select(toolbar, "Research app", Object.entries(names));
@@ -402,9 +407,12 @@ function renderComposer() {
   };
   if (app === "gptr") {
     const mode = select(toolbar, "Report mode", [["research_report", "Research report"], ["deep", "Deep research"]]);
-    mode.value = current.mode;
-    mode.onchange = () => { current.mode = mode.value; };
+    mode.value = current.reportMode;
+    mode.onchange = () => { current.reportMode = mode.value; };
   }
+  const guidedSwitch = button("Guided research", () => { current.mode = "guided"; renderComposer(); });
+  guidedSwitch.className = "link-button";
+  toolbar.append(guidedSwitch);
   const field = element("textarea");
   field.className = "question";
   field.setAttribute("aria-label", app === "ldr" ? "Research task or note" : "Research question");
@@ -452,7 +460,7 @@ function renderComposer() {
   footer.append(hint);
   function payload(action, target = app) {
     return {app: target, action, project_id: project, chat_id: chat, question: action === "native" ? field.value : field.value.trim(),
-      ...(action === "managed" && app === "gptr" ? {mode: current.mode} : {}),
+      ...(action === "managed" && app === "gptr" ? {mode: current.reportMode} : {}),
       ...(action === "managed" && app === "pqa" ? {quote: current.quote, pdfs: current.pdfs.map(item => item.id)} : {})};
   }
   const availableActions = element("details");
@@ -525,8 +533,10 @@ function renderComposer() {
 
 async function renderTranscript(next, files, generation) {
   if (generation !== routeGeneration || !transcript?.isConnected) return;
+  const runs = next?.pipeline_runs || [];
+  const guidedIds = guidedEntryIds(next);
   const entries = next?.entries || [];
-  const signature = JSON.stringify(entries);
+  const signature = JSON.stringify([entries, runs.map(run => [run.id, run.revision, run.state])]);
   if (historySignature === signature) return;
   const container = document.createDocumentFragment();
   const project = next?.project_id || destination();
@@ -535,10 +545,21 @@ async function renderTranscript(next, files, generation) {
   if (!entries.length) {
     const welcome = element("div");
     welcome.className = "welcome";
-    welcome.append(element("h1", "What are you researching?"), element("p", "Choose an app to start a chat."));
+    welcome.append(element("h1", "What are you researching?"),
+      element("p", "Choose a purpose and research quality to start guided research, or use Classic apps."));
     container.append(welcome);
   }
+  const placed = new Set();
   for (const row of entries) {
+    if (guidedIds.has(row.id)) {
+      const run = runs.find(item => item.steps.some(step => step.entry_id === row.id));
+      if (run && !placed.has(run.id)) {
+        placed.add(run.id);
+        try { await renderRun(container, run, lookup); }
+        catch (error) { container.append(element("p", error.message)); }
+      }
+      continue;
+    }
     const entry = {...row, project_id: project};
     const card = element("article");
     card.className = "turn";
@@ -665,7 +686,7 @@ async function refreshConversation() {
   ]);
   if (generation !== routeGeneration || screen !== "workspace") return;
   const stickToEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 100;
-  const oldState = JSON.stringify(conversation?.entries.map(entry => entry.state));
+  const oldState = JSON.stringify([conversation?.entries.map(entry => entry.state), conversation?.pipeline_runs?.map(run => run.state)]);
   [conversation] = result;
   artifacts = result[1]?.artifact || [];
   const last = conversation?.entries.findLast(item => item.app === "pqa" && item.input_ids.length > 0 && item.state !== "Preparing");
@@ -675,10 +696,15 @@ async function refreshConversation() {
   }) || [];
   await renderTranscript(conversation, artifacts, generation);
   if (generation !== routeGeneration || screen !== "workspace") return;
-  if (oldState !== JSON.stringify(conversation?.entries.map(entry => entry.state)) || !composer.childElementCount) renderComposer();
+  const newState = JSON.stringify([conversation?.entries.map(entry => entry.state), conversation?.pipeline_runs?.map(run => run.state)]);
+  if (oldState !== newState || !composer.childElementCount) renderComposer();
   if (stickToEnd) transcript.scrollTop = transcript.scrollHeight;
-  if (conversation?.entries.some(entry => ["Running", "Preparing", "Awaiting approval"].includes(entry.state))) {
+  const runs = conversation?.pipeline_runs || [];
+  if (conversation?.entries.some(entry => ["Running", "Preparing", "Awaiting approval"].includes(entry.state))
+      || runs.some(run => ["queued", "surveying", "running", "waiting_app", "brief_approved"].includes(run.state))) {
     poll = setTimeout(() => refreshConversation().catch(error => say(error.message)), 1600);
+  } else if (runs.some(run => ["waiting_native", "awaiting_papers", "awaiting_disclosure"].includes(run.state))) {
+    poll = setTimeout(() => refreshConversation().catch(error => say(error.message)), 4000);
   }
 }
 

@@ -48,9 +48,11 @@ class NativeHandoff:
             if not part.get("more_body"):
                 return bytes(buf)
 
-    def save_export(self, grant, fmt, payload):
-        request = Request(self.hub + "/_rah_native_export", data=payload, headers={
-            "X-RAH-Export": grant, "X-RAH-Format": fmt, "Content-Type": "application/octet-stream"})
+    def save_export(self, grant, fmt, payload, result=""):
+        headers = {"X-RAH-Export": grant, "X-RAH-Format": fmt, "Content-Type": "application/octet-stream"}
+        if result:
+            headers["X-RAH-Result"] = result
+        request = Request(self.hub + "/_rah_native_export", data=payload, headers=headers)
         try:
             with build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=30) as response:
                 return response.status == 201
@@ -106,10 +108,11 @@ class NativeHandoff:
             if path == "/_rah_handoff_export":
                 item = self.exports.get(ticket)
                 fmt = header(b"x-rah-format").decode("ascii")
-                if not item or fmt not in ("md", "ris"):
+                result = header(b"x-rah-result").decode("ascii")
+                if not item or fmt not in ("md", "ris") or (result and not re.fullmatch(r"[0-9a-fA-F-]{36}", result)):
                     return await self.reply(send, 404)
                 raw = await self.read(receive, self.limit)
-                saved = await asyncio.to_thread(self.save_export, item[1], fmt, raw)
+                saved = await asyncio.to_thread(self.save_export, item[1], fmt, raw, result)
                 return await self.reply(send, 204 if saved else 409)
         except (KeyError, TypeError, ValueError):
             return await self.reply(send, 400)

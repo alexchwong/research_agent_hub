@@ -2,6 +2,30 @@
 
 Package from a clean checkout or export. Exclude local environments, caches, reports and populated `.env` files. Retain sanitised evidence separately. The release workflows target Ubuntu 26.04 x64, macOS 15 arm64 and Windows Server 2025 x64. A Windows Server run checks the package and native startup. Windows 11 desktop acceptance is a separate observation.
 
+## Purpose pipeline refactor (unreleased)
+
+The refactor is unreleased work after 0.1.0; package metadata stays at 0.1.0 and the 0.1.0 acceptance below is unchanged. Baseline `b3b5df450a15f0b38aa3bffb4fdc9a42e31a3400`. Implementer environment Ubuntu 24.04 x64, Python 3.12.3 (the release pin is 3.12.14), uv 0.13.9 for locked dev tools and 0.11.32 for the probe environments, Node 22, Chrome. No real provider keys, model searches or open-access requests were used.
+
+### P0–P5 offline evidence
+
+| Gate | Evidence |
+| --- | --- |
+| P0 · Pinned runtime | GPT Researcher and PaperQA2 installed from their unchanged Ubuntu locks. LDR installed from its lock minus `torch==2.15.0+cpu` (the CPU index was unreachable from this host); the probes do not import Torch. The installed GPT Researcher `--help` lists `research_report` and `deep`. `tests/probe_gptr_survey.py` ran the installed CLI with fake transports: effective survey settings matched, four DeepSeek chat requests each carried `max_completion_tokens: 2048`, no reasoning effort was sent, native temperatures and a 10-attempt native retry wrapper were observed, PubMed Central searches used `retmax=3`, no embeddings were requested on this route, and the tokenizer file is fetched on first use (now cached privately and disclosed). `tests/probe_paper_transport.py` passed for `pqa-budget-v1`, `pqa-standard-v1` and `pqa-premium-v1` with the new worker. `tests/probe_ldr_feasibility.py`: RIS emitter pass; downloader contract fail (no identifier/version, origin URL or licence evidence; landing-page attempt; paywall label); SDK fail (no typed RIS; needs a provider snapshot). The PMC adapter and native LDR path were therefore implemented. The installed `paperqa_pypdf` parser rejected empty-text, invalid and encrypted PDFs. |
+| P1 · Workspace | Real schema 2 fixtures with named and standalone chats, Trash, legacy run results, BibTeX sidecars, papers and Unicode names upgraded with identical row counts, IDs and file digests; backup integrity and version recorded; injected failure rolled back and a redo succeeded; future versions refused before workspace changes; three simultaneous launches upgraded once; multi-output publication, exact replay, conflicting replays, injected partial-commit failure, orphan recovery and cross-scope lineage rejection. |
+| P2 · Survey and Scope Gate | Projection sealing and rejection of `CONFIG_PATH`, legacy overrides, multi-retriever and remote SearXNG; private files, paths, PDF names, questions and earlier entries absent from survey arguments and Gate payloads; exact questionnaire shape including fenced, malformed, duplicate-key, oversized, URL and markup outputs; adversarial labels rendered as plain text; generic fallback; replace and add custom text; conflict and broad-scope rules; unchanged broad prompt; explicit round two; zero-source and timeout handling with no downstream dispatch; POSIX process-group kill on timeout and cancel. |
+| P3 · Recipes and recovery | All five recipes end to end with a fake GPT Researcher CLI, fake Gate and fake native exports; guided/legacy one-active-request guard; unavailable PaperQA2 route; waiting for a missing or busy app in FIFO order; cancel and decline; restart interruption with verified reuse; route, credential and process changes requiring re-confirmation; request and action replay; stale revisions. |
+| P4 · Native and acquisition | Guided LDR exports bound to the attempt and native result ID, wrong-result and changed-byte rejection, optional sibling format, manual imports; automatic open-access download and registration through the PMC route with a fake transport, DOI conversion, version choice, TDM/retracted/unknown-licence/identity-mismatch handling, private-identifier review and decline; redirect, encoding, size, truncation and non-public address refusal against a local server. |
+| P5 · Profiles and audit | Exact six-model mapping, guided runs leave `.env` and native profiles unchanged, worker digest and disabled-candidate registry, retired-route refusal, protected API surface. The installed-wheel fixture smoke passed. A Chrome walkthrough at 1440 and 390 pixels covered the composer and quality selector, public start review, scope form, Rapid completion, corroboration's LDR stage, Papers Needed and Settings → Research models and Guided research, with no page errors. |
+
+The offline suite passed 166 checks and skipped one Windows-only check; three opt-in live checks were deselected.
+
+### Remaining before a release claim
+
+- **P6 live campaign** (`scripts/live_rah_refactor.py`): public survey, Scope Gate, custom scope, Rapid per quality and one Deep report; open-access success and unresolved cases; Usage; provider error handling; candidate PaperQA2 route qualification with owner-approved provider tuples. Standard PaperQA2 must qualify on each supported platform before release.
+- **Packaged smoke** with the real pins on each CI host, including the new transport probe.
+- **Desktop matrix**: guided walkthroughs on Windows 11 x64 (including `taskkill` tree termination), Apple silicon macOS 14+ and Ubuntu x64, and the native LDR literature flow with authenticated export, reopen after restart and native history.
+- Route enablement in `rah/pqa_profiles.py` only after owner approval of the P6 evidence, followed by the offline identity check.
+
 ## 0.1.0 workspace audit
 
 Baseline `fb25fd96e1174c4af745a926709745ea93c663f6`. Implementer environment Debian 13.7 x64, Python 3.12.14 and uv 0.13.9. The UI walkthrough used Chromium at 1440 and 390 pixels wide. Managed execution in the walkthrough used controlled native responses and no live credentials. Prior PaperQA2 provider evidence appears below.
@@ -31,6 +55,8 @@ The offline suite passed 18 checks and skipped its three opt-in live checks. Bot
 The fresh install initially failed on the two native apps with source-built dependencies. Current devel tracked their locks but omitted the bundled wheel files. The audit restored seven previously shipped wheels from the earlier v3 archive and verified each against its earlier release lock. The LDR and GPT Researcher platform locks now reference those exact bytes. All application and dependency versions and PaperQA2 locks are unchanged. The three Linux app environments used about 4.3 GiB on the audit host. Allow additional downloads and uv cache space. Use a disk-backed temporary directory for the combined installed smoke.
 
 ## Reused PaperQA2 live evidence
+
+This evidence belongs to the retired `openrouter-text-v1` route and the earlier `rah/worker.py`. It does not qualify the new managed routes.
 
 The authorised Ubuntu x64 WSL2 report from 22 November 2026 passed 35 checks with the installed hub and unchanged worker. It covered approved-subset staging, prior index isolation, decline and replay, native PDF answers and citations, onward request destinations and refusal to fall back for chat and embeddings. Ten chat generations reported Azure. Embedding requests were eligible for Azure alone and the paired invalid-provider check was rejected. The successful embedding responses did not identify the serving provider. The separate process trace showed DNS and HTTPS traffic consistent with the OpenRouter run. Its scope is the recorded process capture.
 

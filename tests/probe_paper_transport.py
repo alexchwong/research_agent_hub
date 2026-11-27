@@ -16,7 +16,11 @@ def blocked(*args, **kwargs):
     raise RuntimeError("Network access is disabled in this probe")
 
 
-def probe(worker, runner):
+MODELS = {"pqa-budget-v1": ("anthropic/claude-haiku-5.5",) * 3, "pqa-standard-v1": ("anthropic/claude-haiku-5.5", "openai/gpt-6.1-terra", "openai/gpt-6.1-terra"),
+          "pqa-premium-v1": ("anthropic/claude-sonnet-5.5",) * 3}
+
+
+def probe(worker, runner, route="pqa-standard-v1"):
     spec = importlib.util.spec_from_file_location("rah_worker", worker)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -27,14 +31,16 @@ def probe(worker, runner):
     base = "https://openrouter.ai/api/v1/"
     expected = {}
     destinations = []
+    summary, agent, answer = MODELS[route]
+    chosen = {"summary": summary, "agent": agent, "answer": answer, "embedding": "openai/text-embedding-3-small"}
     for role in ("answer", "summary", "agent", "embedding"):
         provider = "fixture-" + role
         embedding = role == "embedding"
         endpoint = base + ("embeddings" if embedding else "chat/completions")
-        model = "openai/text-embedding-3-small" if embedding else "openai/gpt-4.1-mini"
+        model = chosen[role]
         destinations.append({"role": role, "service": "OpenRouter", "provider": provider, "model": model, "endpoint": endpoint})
         expected[provider] = (endpoint, model)
-    profile = {"id": "openrouter-text-v1", "destinations": destinations}
+    profile = {"id": route, "policy": "single-provider-no-fallback", "destinations": destinations}
     settings = Settings(**module.paper_options(profile))
     observed = set()
 
@@ -92,13 +98,14 @@ def probe(worker, runner):
         with module.paper_transport(profile):
             runner.run(exercise())
     assert observed == expected.keys(), observed
-    print("PaperQA2 serialized OpenRouter provider restrictions for answer, summary, agent tools and embeddings.")
+    print(f"PaperQA2 serialized OpenRouter provider restrictions for {route}: answer, summary, agent tools and embeddings.")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--worker", type=Path, required=True)
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--route", default="pqa-standard-v1", choices=sorted(MODELS))
     args = parser.parse_args()
     logging.disable(logging.CRITICAL)
     with verification(args.report, "paperqa_transport") as report:
@@ -109,5 +116,5 @@ if __name__ == "__main__":
                 runner.get_loop()
                 with patch.object(socket.socket, "connect", blocked), patch.object(socket.socket, "connect_ex", blocked), \
                         patch.object(socket, "getaddrinfo", blocked):
-                    probe(args.worker.resolve(), runner)
+                    probe(args.worker.resolve(), runner, args.route)
         report["checks"].update(dict.fromkeys(("answer", "summary", "agent_tools", "embedding"), "passed"))

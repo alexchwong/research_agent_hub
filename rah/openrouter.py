@@ -135,6 +135,19 @@ class OpenRouter:
         return models
 
 
+    def cached_prices(self):
+        """Advertised per-model prices from the cached catalogue only. Never fetches."""
+        with self.lock:
+            prices, stamp = {}, None
+            for family in ("chat", "embedding"):
+                cached = self.catalogue.get(("choices", family))
+                if cached:
+                    stamp = cached[0].get("refreshed_at") or stamp
+                    for row in cached[0]["models"]:
+                        prices[row["id"]] = {"input": row["input"], "output": row["output"],
+                                             "stale": monotonic() - cached[1] >= 900}
+            return {"models": prices, "refreshed_at": stamp}
+
     def choices(self, family):
         key = self.get_key()
         with self.lock:
@@ -198,9 +211,8 @@ class OpenRouter:
         if models is None and cached:
             return cached[0] | {"stale": True}
         if not choices:
-            from .settings import DEFAULT_CHAT_MODEL, DEFAULT_EMBEDDING_MODEL, PAPER_MODELS
-            ids = {model for role, model in PAPER_MODELS.items() if (role == "embedding") == (family == "embedding")}
-            ids.add(DEFAULT_EMBEDDING_MODEL if family == "embedding" else DEFAULT_CHAT_MODEL)
+            from .research_profiles import MODELS
+            ids = {model for key, model in MODELS.items() if (key == "embedding_small") == (family == "embedding")}
             choices = [{"id": model, "input": None, "output": None, "context": None, "tools": None, "score": None}
                        for model in sorted(ids)]
         result = {"models": sorted(choices, key=preference), "shortlist": sorted(shortlisted),

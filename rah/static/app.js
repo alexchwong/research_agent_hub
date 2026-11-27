@@ -256,6 +256,11 @@ const modelLabels = {
   RAH_PQA_AGENT: "PaperQA2 agent", RAH_PQA_EMBEDDING: "PaperQA2 embeddings",
   RAH_PQA_SETTINGS_FILE: "Native PaperQA2 settings path",
 };
+const guidedLabels = {
+  RAH_OA_AUTO: "Automatically obtain available open-access PDFs",
+  RAH_OA_PMC_CONTACT_EMAIL: "PMC ID Converter contact email (maintainer’s published contact)",
+  RAH_OPENURL_BASE: "Institutional OpenURL base (HTTPS, optional)",
+};
 const credentialLabels = {
   RAH_OPENROUTER_API_KEY: "Shared OpenRouter key",
   RAH_NATIVE_GPTR__OPENAI_API_KEY: "GPT Researcher OpenAI key",
@@ -267,7 +272,35 @@ async function settings() {
   if (screen !== "settings") return;
   view.replaceChildren(element("h1", "Settings"));
   const managed = section(view, "OpenRouter");
-  managed.append(element("p", "With a saved key, unconfigured GPT Researcher and Local Deep Research roles use the defaults below. The reviewed PaperQA2 profile stays separate."));
+  managed.append(element("p", "With a saved key, unconfigured GPT Researcher Classic and Local Deep Research roles use the defaults below. "
+    + "Guided research uses the fixed Research models below for each run and never changes these native settings."));
+  const models = section(view, "Research models", "Guided research quality fixes these OpenRouter models per role. RAH does not set reasoning effort.");
+  const catalogue = (await api("/workspace")).guided;
+  const table = element("table");
+  table.className = "model-table";
+  const head = element("tr");
+  head.append(element("th", "Role"), ...catalogue.profiles.qualities.map(item => element("th", item.label + (item.id === catalogue.profiles.default ? " · default" : ""))));
+  table.append(head);
+  for (const [role, label] of Object.entries(catalogue.profiles.role_labels)) {
+    const row = element("tr");
+    row.append(element("th", label), ...catalogue.profiles.qualities.map(item => element("td", item.roles[role])));
+    table.append(row);
+  }
+  models.append(table, element("p", "Reasoning effort · " + catalogue.profiles.effort));
+  const pdfRow = element("p", "Managed PDF analysis · " + Object.entries(catalogue.pdf_analysis).map(([quality, item]) =>
+    quality + (item.available ? " available" : " unavailable on this platform")).join(" · "));
+  const priceList = element("ul");
+  models.append(pdfRow, priceList, button("Refresh advertised prices", async () => {
+    const [chat, embedding] = await Promise.all([api("/models/chat?details=1"), api("/models/embedding?details=1")]);
+    const rows = new Map([...chat.models, ...embedding.models].map(item => [item.id, item]));
+    priceList.replaceChildren(...Object.values(catalogue.profiles.models).map(id => {
+      const item = rows.get(id);
+      return element("li", id + " · " + (item && item.input !== null ? "$" + item.input + " input" + (item.output !== null ? " / $" + item.output + " output" : "") + " per 1M tokens" : "price unknown")
+        + (chat.stale || embedding.stale ? " · stale" : ""));
+    }));
+    say(chat.refreshed_at ? "Advertised prices refreshed " + chat.refreshed_at + ". RAH sets no spending ceiling." : "Live prices are unavailable.");
+  }));
+  const guided = section(view, "Guided research", "Automatic open-access download is off by default. When on, RAH sends only exact public DOIs or PMCIDs to the official PMC services; every PDF transfer to PaperQA2 still needs its own review.");
   const search = section(view, "Search sources", "The default literature searches need no separate search key. Search still sends queries to the selected service; model calls use your existing model settings.");
   search.append(element("p", "PaperQA2 searches the PDFs you select. It does not need an external search key."));
   const searchFields = {gptr: ["GPT Researcher", "RAH_NATIVE_GPTR__RETRIEVER", "RAH_NATIVE_GPTR__SEARX_URL"],
@@ -335,9 +368,14 @@ async function settings() {
   const cleared = {};
   for (const [key, value] of Object.entries(info.values)) {
     const shared = ["RAH_OPENROUTER_CHAT_MODEL", "RAH_OPENROUTER_EMBEDDING_MODEL"].includes(key);
-    const input = searchInputs[key] || control(shared ? managed : modelLabels[key] ? advanced : nativeDetails, modelLabels[key] || key);
+    let input = searchInputs[key];
+    if (!input && key === "RAH_OA_AUTO") {
+      input = select(guided, guidedLabels[key], [["false", "Off"], ["true", "On"]]);
+      input.value = value === "true" ? "true" : "false";
+    }
+    input ||= control(shared ? managed : guidedLabels[key] ? guided : modelLabels[key] ? advanced : nativeDetails, guidedLabels[key] || modelLabels[key] || key);
     input.dataset.key = key;
-    input.value = value;
+    if (key !== "RAH_OA_AUTO") input.value = value;
     changes[key] = input;
   }
   for (const family of ["chat", "embedding"]) {
@@ -380,15 +418,7 @@ async function settings() {
     for (const role of roles) changes["RAH_" + role].addEventListener("focus", populate, {once: true});
     managed.append(button("Load OpenRouter " + family + " models", populate), defaults, roleModels);
   }
-  managed.append(button("Use recommended PaperQA2 settings", () => {
-    const list = element("ul");
-    for (const [key, value] of Object.entries(info.paper_suggestions)) {
-      const old = changes[key].value;
-      changes[key].value = value;
-      list.append(element("li", (modelLabels[key] || key) + " · " + (old || "Blank") + " → " + value));
-    }
-    recommendations.replaceChildren(element("p", "PaperQA2 changes to apply when you save"), list);
-  }), recommendations);
+  managed.append(element("p", "PaperQA2 role settings below apply to the standalone native app only. Managed PDF analysis uses the qualified Research models route."), recommendations);
   for (const [app, prefix] of [["LDR", "LDR_"], ["GPT Researcher", "GPTR_"], ["PaperQA2", "PQA_"]]) {
     advanced.append(button("Reset " + app + " to native", () => {
       for (const key of Object.keys(modelLabels).filter(key => key.startsWith("RAH_" + prefix))) {
@@ -428,6 +458,11 @@ async function settings() {
 }
 
 const recipes = [
+  ["Literature review (guided)", "Survey → scope questions → native LDR discovery with RIS → Papers Needed with optional open-access PDFs → reviewed PaperQA2 analysis. Finish with discovery only after RIS intake."],
+  ["Deep research (guided)", "Survey → scope questions → GPT Researcher deep report → optional paper collection and reviewed PaperQA2 analysis, or finish with the report."],
+  ["Rapid research (guided)", "Survey → scope questions → GPT Researcher research report, or use the survey as the result."],
+  ["Independent corroboration (guided)", "Survey → scope questions → LDR report then GPT Researcher report on the same shared framing, shown side by side. RAH writes no combined judgement."],
+  ["Analyse my papers (guided)", "Public topic survey → scope questions → choose your PDFs → enter the private question → reviewed PaperQA2 analysis."],
   ["Academic literature survey", "Start with a literature question in LDR's academic search. Attach its original report, review the citations in Papers Needed, obtain PDFs through your own access and approve selected files for PaperQA2. Revisit the original report and cited answer in the project. Search, models and embeddings may incur charges."],
   ["Deep research to paper analysis", "Run GPT Researcher Deep Research with a public question. Attach the original cited report, review the requested full texts and choose which PDFs PaperQA2 should analyse. Continue in Papers Needed. Native search, model and embedding charges may apply."],
   ["Broad-to-deep investigation", "Start with a broad web question in LDR. Review its original report and write a focused follow-up in GPT Researcher's Deep Research mode. Keep both reports in the project. Configured search and model providers may charge."],

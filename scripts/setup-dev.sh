@@ -47,6 +47,7 @@ if [[ $mode == --verify ]]; then
   node --check rah/static/app.js
   node --check rah/static/workspace.js
   node --check rah/static/native_handoff.js
+  node --check rah/static/guided.js
 
   cd "$run"
   "$installed" -I -c '

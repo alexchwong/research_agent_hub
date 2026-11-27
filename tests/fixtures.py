@@ -106,3 +106,21 @@ def fixture_bundle(bundle):
             "settings_capabilities": [], "essential": [distribution],
         })
     (bundle / "routes.json").write_text(json.dumps({"schema_version": 1, "routes": rows}), encoding="utf-8")
+
+
+def text_pdf(text="Synthetic text", encrypt=False):
+    objects = [b"<</Type/Catalog/Pages 2 0 R>>", b"<</Type/Pages/Kids[3 0 R]/Count 1>>",
+               b"<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 144]/Contents 4 0 R/Resources<</Font<</F1 5 0 R>>>>>>",
+               None, b"<</Type/Font/Subtype/Type1/BaseFont/Helvetica>>"]
+    stream = b"BT /F1 18 Tf 20 100 Td (" + text.encode() + b") Tj ET" if text else b""
+    objects[3] = b"<</Length %d>>stream\n" % len(stream) + stream + b"\nendstream"
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for number, body in enumerate(objects, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % number + body + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
+    out += b"".join(b"%010d 00000 n \n" % offset for offset in offsets)
+    out += b"trailer\n<</Size %d/Root 1 0 R>>\nstartxref\n%d\n%%%%EOF\n" % (len(objects) + 1, xref)
+    return bytes(out)

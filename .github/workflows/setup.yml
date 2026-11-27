@@ -43,6 +43,7 @@ jobs:
           node --check rah/static/app.js
           node --check rah/static/workspace.js
           node --check rah/static/native_handoff.js
+          node --check rah/static/guided.js
       - name: Build the release candidate ZIP
         shell: bash
         run: |

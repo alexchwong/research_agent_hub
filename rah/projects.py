@@ -1,7 +1,8 @@
 import json
 import os
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
+import hashlib
 from importlib import resources
 from pathlib import Path, PurePath
 import re
@@ -10,9 +11,10 @@ import sqlite3
 import stat
 from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
-from uuid import uuid4
+from threading import RLock
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
-from .common import Problem, atomic, child, file_digest, id_value, is_link, private_directory, verify_windows_root
+from .common import Problem, atomic, child, file_digest, id_value, is_link, private_directory, read_json, verify_windows_root, write_json
 
 
 REPORT_LIMIT = 32 * 1024 * 1024
@@ -109,12 +111,40 @@ def structured_citations(path):
 
 
 UNFILED = "00000000-0000-4000-8000-000000000001"
+SCHEMA_VERSION = 3
+PRESERVED_TABLES = ("project", "scope", "chat", "chat_entry", "artifact", "paper", "workspace_setting")
+KINDS = {"pdf": {".pdf"}, "report": {".md", ".txt", ".json", ".ris"}, "answer": {".md"},
+         "citations": {".ris", ".bib"}, "questionnaire": {".json"}}
+MEDIA = {".md": "text/markdown", ".txt": "text/plain", ".json": "application/json", ".pdf": "application/pdf",
+         ".ris": "application/x-research-info-systems", ".bib": "application/x-bibtex"}
+ROLES = {"survey", "research_report", "discovery_report", "citation_export", "scope_questionnaire",
+         "source_pdf", "answer", "references", "attachment", "native_result"}
+ORIGINS = {"public_native", "public_acquired", "private_or_unknown", "local_generated"}
+OUTPUT_KEY = re.compile(r"(?:primary|report|citations|questionnaire|answer|references|survey|pdf:[0-9a-f-]{36})")
+
+
+def stored_version(database):
+    """Read the schema version without creating or changing the database."""
+    if not database.exists():
+        return 0
+    with closing(sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True)) as db:
+        return db.execute("PRAGMA user_version").fetchone()[0]
+
+
+def output_id(step, key):
+    """Deterministic artifact identity for one output key of one step attempt."""
+    return str(uuid5(NAMESPACE_URL, f"rah:step-output:{id_value(step)}:{key}"))
 
 
 class Projects:
-    def __init__(self, root):
+    def __init__(self, root, *, migration_hook=None):
         self.root = root
+        self.writer = RLock()
         self.database = child(root, "hub", "state.sqlite3")
+        version = stored_version(self.database)
+        if version > SCHEMA_VERSION:
+            raise Problem("workspace_version", "This workspace was upgraded by a newer RAH release. "
+                          "Use that release, or restore the pre-upgrade backup with its matching files.", 409)
         if not self.database.exists():
             self.database.touch(mode=0o600)
         with self.connect() as db:
@@ -138,6 +168,7 @@ class Projects:
                         db.execute(statement)
                 if db.execute("PRAGMA foreign_key_check").fetchone():
                     raise Problem("workspace_migration", "Workspace migration found invalid file references.")
+        self.upgrade_v3(migration_hook)
         with self.connect() as db:
             saved = db.execute("SELECT path FROM workspace_setting WHERE id=1").fetchone()
             self.workspace_root = self.check_root(Path(saved[0])) if saved else root
@@ -158,6 +189,65 @@ class Projects:
                         directory.chmod(0o700)
                     self.prepare_chat(row)
         self.reconcile_trash()
+
+    def backup_pre_v3(self):
+        directory = private_directory(child(self.root, "hub", "backups"))
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        target = child(directory, f"state-pre-v3-{stamp}.sqlite3")
+        with closing(sqlite3.connect(self.database)) as source, closing(sqlite3.connect(target)) as copy:
+            source.backup(copy)
+        os.chmod(target, 0o600)
+        with closing(sqlite3.connect(target)) as copy:
+            integrity = copy.execute("PRAGMA integrity_check").fetchone()[0]
+            version = copy.execute("PRAGMA user_version").fetchone()[0]
+        if integrity != "ok" or version != 2:
+            target.unlink(missing_ok=True)
+            raise Problem("workspace_migration", "RAH could not verify a pre-upgrade workspace backup. Nothing was changed.")
+        write_json(child(directory, target.stem + ".json"), {
+            "label": "Workspace database before schema 3", "created_at": now(), "user_version": version,
+            "integrity_check": integrity, "sha256": file_digest(target), "workspace": str(self.root)})
+        return target
+
+    def upgrade_v3(self, hook=None):
+        """Upgrade schema 2 to 3 in one immediate transaction after a verified backup."""
+        with closing(sqlite3.connect(self.database, isolation_level=None, timeout=30)) as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                return None
+            db.execute("PRAGMA foreign_keys=OFF")
+            # The reserved lock excludes other writers from the backup through to the commit.
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("PRAGMA user_version").fetchone()[0] != 2:
+                db.execute("ROLLBACK")
+                return None
+            backup = None
+            try:
+                backup = self.backup_pre_v3()
+                counts = {name: db.execute(f"SELECT count(*) FROM {name}").fetchone()[0] for name in PRESERVED_TABLES}
+                identities = {name: db.execute(f"SELECT group_concat(id, ',') FROM (SELECT id FROM {name} ORDER BY id)").fetchone()[0]
+                              for name in ("chat_entry", "artifact", "paper")}
+                sql = resources.files("rah").joinpath("workspace_schema_3.sql").read_text(encoding="utf-8")
+                for statement in sql.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                if hook:
+                    hook(db)
+                after = {name: db.execute(f"SELECT count(*) FROM {name}").fetchone()[0] for name in PRESERVED_TABLES}
+                moved = {name: db.execute(f"SELECT group_concat(id, ',') FROM (SELECT id FROM {name} ORDER BY id)").fetchone()[0]
+                         for name in identities}
+                if (after != counts or moved != identities or db.execute("PRAGMA foreign_key_check").fetchone()
+                        or db.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+                        or db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION):
+                    raise Problem("workspace_migration", "Workspace upgrade verification failed.")
+                db.execute("COMMIT")
+            except BaseException as error:
+                db.execute("ROLLBACK")
+                location = f" A verified backup is at {backup}." if backup else ""
+                raise Problem("workspace_migration", "RAH could not upgrade the workspace database and left it unchanged."
+                              + location + " Close other RAH instances and retry, or restore the backup.", 503) from error
+        with self.connect() as db:
+            if db.execute("PRAGMA foreign_key_check").fetchone() or db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                raise Problem("workspace_migration", f"The upgraded workspace failed its checks. Restore {backup}.", 503)
+        return backup
 
     @staticmethod
     def check_root(path):
@@ -344,10 +434,10 @@ class Projects:
                 return self.workspace_entry(db, scope, entry) | {"replay": True}
             if chat:
                 self.require_chat(db, project or chat, chat)
-                if action == "managed" and db.execute(
+                if action == "managed" and (db.execute(
                     """SELECT 1 FROM chat_entry WHERE chat_id=? AND action='managed'
                        AND state IN ('Preparing','Awaiting approval','Running')""", (chat,)
-                ).fetchone():
+                ).fetchone() or self.active_run(db, chat)):
                     raise Problem("chat_busy", "Finish or discard the active request in this chat.", 409)
             ready()
             date = now()
@@ -381,7 +471,13 @@ class Projects:
     def interrupt(self):
         with self.connect(write=True) as db:
             db.execute("""UPDATE chat_entry SET state='Interrupted', reason='The hub restarted before this request finished.',
-                        updated_at=? WHERE state='Running' OR (state='Preparing' AND action='native')""", (now(),))
+                        updated_at=? WHERE (state='Running' OR (state='Preparing' AND action='native'))
+                        AND id NOT IN (SELECT entry_id FROM pipeline_step)""", (now(),))
+
+    def set_preview(self, project, entry, preview_id):
+        with self.connect(write=True) as db:
+            self.workspace_entry(db, project, entry)
+            db.execute("UPDATE chat_entry SET preview_id=?, updated_at=? WHERE id=?", (preview_id, now(), entry))
 
     @contextmanager
     def connect(self, write=False):
@@ -443,6 +539,8 @@ class Projects:
                 raise Problem("chat_missing", "Chat not found.", 404)
             if db.execute("SELECT 1 FROM chat_entry WHERE chat_id=? AND state IN ('Preparing','Awaiting approval','Running')", (chat,)).fetchone():
                 raise Problem("chat_busy", "Finish or discard active work before deleting this chat.", 409)
+            if self.active_run(db, chat):
+                raise Problem("chat_busy", "Cancel or finish the active guided research before deleting this chat.", 409)
             if db.execute("""SELECT 1 FROM paper p JOIN artifact a ON a.project_id=p.project_id
                              AND a.id IN (p.source_artifact_id,p.pdf_artifact_id) WHERE a.chat_id=?""", (chat,)).fetchone():
                 raise Problem("chat_referenced", "Remove or replace Papers Needed references to this chat's files before deleting it.", 409)
@@ -460,7 +558,13 @@ class Projects:
 
     def has_active(self):
         with self.connect() as db:
-            return bool(db.execute("SELECT 1 FROM chat_entry WHERE state IN ('Preparing','Awaiting approval','Running')").fetchone())
+            return bool(db.execute("SELECT 1 FROM chat_entry WHERE state IN ('Preparing','Awaiting approval','Running')").fetchone()
+                        or self.active_run(db))
+
+    @staticmethod
+    def active_run(db, chat=None):
+        return db.execute("""SELECT id FROM pipeline_run WHERE state NOT IN ('succeeded','failed','cancelled')
+                             AND chat_id=COALESCE(?, chat_id) LIMIT 1""", (chat,)).fetchone()
 
     def restore_chat(self, chat):
         with self.connect(write=True) as db:
@@ -535,13 +639,16 @@ class Projects:
                 return child(self.chat_directory(self.require_chat(db, project, chat)), "files")
         return child(self.folder(project), "files")
 
-    def register(self, project, stream, filename, kind, revision=None, app=None, version=None, run_id=None, bib=None, *, entry=None, attachment_id=None, chat=None):
+    def register(self, project, stream, filename, kind, revision=None, app=None, version=None, run_id=None, bib=None, *, entry=None,
+                 attachment_id=None, chat=None, role=None, origin="private_or_unknown", output_key=None):
         if not isinstance(filename, str) or not filename or len(filename) > 255 or any(ord(char) < 32 for char in filename):
             raise Problem("file_name", "The file name is invalid.")
         suffix = PurePath(filename).suffix.lower()
-        valid = {"pdf": {".pdf"}, "report": {".md", ".txt", ".json", ".ris"}, "answer": {".md"}}
-        if suffix not in valid.get(kind, {}):
+        if suffix not in KINDS.get(kind, {}) or kind == "questionnaire":
             raise Problem("file_type", "Select a PDF, Markdown, plain-text, JSON or RIS file as appropriate.")
+        if (role is not None and role not in ROLES) or origin not in ORIGINS:
+            raise Problem("artifact_role", "Unknown artifact role or origin.")
+        output_key = output_key or ("primary" if run_id else None)
         with self.connect() as db:
             scope = self.require_scope(db, project)
             if revision is not None and revision != scope["revision"]:
@@ -590,10 +697,14 @@ class Projects:
                     self.require_chat(db, project, chat)
                 checksum = file_digest(temp_path)
                 if run_id:
-                    previous = db.execute("SELECT id, chat_id FROM artifact WHERE project_id=? AND run_id=?", (project, run_id)).fetchone()
+                    previous = db.execute("SELECT * FROM artifact WHERE project_id=? AND run_id=? AND output_key=?",
+                                          (project, run_id, output_key)).fetchone()
                     if previous:
                         if previous["chat_id"] != chat:
                             raise Problem("run_owner", "The saved result belongs to a different chat.", 409)
+                        if (previous["kind"] != kind or previous["sha256"] != checksum or previous["step_id"] is not None
+                                or PurePath(previous["original_name"] or "").suffix.lower() != suffix):
+                            raise Problem("run_replay", "This run already saved a different result.", 409)
                         return previous["id"]
                 if attachment_id:
                     previous = db.execute("SELECT * FROM artifact WHERE project_id=? AND id=?", (project, artifact)).fetchone()
@@ -607,6 +718,8 @@ class Projects:
                         return artifact
                 if request:
                     request = self.workspace_entry(db, project, entry)
+                    if db.execute("SELECT 1 FROM pipeline_step WHERE entry_id=?", (entry,)).fetchone():
+                        raise Problem("guided_entry", "Use the guided stage actions to add files to this step.", 409)
                     if run_id:
                         if request["run_id"] != run_id or request["state"] not in ("Running", "Interrupted"):
                             raise Problem("run_owner", "This run is no longer associated with the request.", 409)
@@ -629,9 +742,11 @@ class Projects:
                     atomic(sidecar, bib.encode())
                 db.execute(
                     """INSERT INTO artifact
-                    (project_id,id,kind,app_id,app_version,original_name,storage_name,sha256,size_bytes,run_id,created_at,chat_id)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    (project, artifact, kind, app, version, filename, stored_name, checksum, size, run_id, now(), chat),
+                    (project_id,id,kind,app_id,app_version,original_name,storage_name,sha256,size_bytes,run_id,created_at,chat_id,
+                     role,media_type,output_key,origin_class)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (project, artifact, kind, app, version, filename, stored_name, checksum, size, run_id, now(), chat,
+                     role, MEDIA.get(suffix), output_key, origin),
                 )
                 if request:
                     column = "result_ids" if run_id or request["action"] == "native" else "input_ids"
@@ -678,11 +793,15 @@ class Projects:
                     raise Problem("source_association", "Pick an original source from this project.")
                 paper = id_value(row["id"]) if row.get("id") else str(uuid4())
                 db.execute(
-                    """INSERT INTO paper VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """INSERT INTO paper (project_id,id,title,doi,pmid,citation_url,note,source_artifact_id,pdf_artifact_id,
+                    abstract_only,state,access_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     ON CONFLICT (project_id,id) DO UPDATE SET title=excluded.title,doi=excluded.doi,pmid=excluded.pmid,
                     citation_url=excluded.citation_url,note=excluded.note,source_artifact_id=excluded.source_artifact_id,
-                    pdf_artifact_id=excluded.pdf_artifact_id,abstract_only=excluded.abstract_only,state=excluded.state""",
-                    (project, paper, *fields, source, pdf, int(row.get("abstract_only") is True), state),
+                    pdf_artifact_id=excluded.pdf_artifact_id,abstract_only=excluded.abstract_only,state=excluded.state,
+                    access_status=CASE WHEN excluded.pdf_artifact_id IS NOT NULL THEN 'local_available'
+                        WHEN paper.access_status='local_available' THEN 'unresolved' ELSE paper.access_status END""",
+                    (project, paper, *fields, source, pdf, int(row.get("abstract_only") is True), state,
+                     "local_available" if pdf else "unresolved"),
                 )
             self.change(db, project)
 
@@ -711,3 +830,177 @@ class Projects:
         if sum(row["size_bytes"] for row in rows) > 512 * 1024 * 1024:
             raise Problem("pdf_selection", "The selected corpus is over 512 MiB.", 413)
         return rows
+
+    # ---- Guided multi-output registry -------------------------------------------------
+
+    def stage(self, project, chat, source, filename, kind, *, limit=None):
+        """Copy verified bytes into a private temporary file beside their destination."""
+        suffix = PurePath(filename).suffix.lower()
+        if suffix not in KINDS.get(kind, {}):
+            raise Problem("file_type", "The output has an unexpected file type.")
+        directory = self.files_directory(project, chat)
+        if not directory.is_dir():
+            private_directory(directory)
+        limit = limit or (PDF_LIMIT if kind == "pdf" else REPORT_LIMIT)
+        size = 0
+        hasher = hashlib.sha256()
+        handle = NamedTemporaryFile(dir=directory, prefix=".rah-stage-", delete=False)
+        path = Path(handle.name)
+        try:
+            with handle:
+                stream = source.open("rb") if isinstance(source, Path) else source
+                try:
+                    first = True
+                    while block := stream.read(1024 * 1024):
+                        if first and kind == "pdf" and not block.startswith(b"%PDF-"):
+                            raise Problem("file_format", "The output has no PDF header.")
+                        first = False
+                        size += len(block)
+                        if size > limit:
+                            raise Problem("file_size", "The output exceeds its size limit.", 413)
+                        hasher.update(block)
+                        handle.write(block)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                finally:
+                    if isinstance(source, Path):
+                        stream.close()
+            if not size:
+                raise Problem("empty_file", "The output is empty.")
+            if kind != "pdf":
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except UnicodeError as error:
+                    raise Problem("file_format", "The output must be UTF-8 text.") from error
+                if kind == "questionnaire":
+                    json.loads(text)
+            return {"temp": path, "sha256": hasher.hexdigest(), "size": size, "suffix": suffix,
+                    "filename": filename, "kind": kind}
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+
+    def publish(self, project, chat, outputs, *, step=None, run_id=None, entry=None, check=None, finalize=None, marker=None):
+        """Place staged outputs and register them, their parents and the entry results atomically.
+
+        Exact replays return the original IDs. Differences in owner, step, run, key, kind, name or bytes are rejected.
+        """
+        placed = []
+        ids = []
+        try:
+            with self.writer:
+                for item in outputs:
+                    key = item["key"]
+                    if not OUTPUT_KEY.fullmatch(key) or item.get("role") not in ROLES | {None} or item.get("origin", "private_or_unknown") not in ORIGINS:
+                        raise Problem("artifact_output", "Invalid output identity.", 409)
+                    item["id"] = output_id(step, key) if step else item.get("id") or str(uuid4())
+                    item["storage"] = item["id"] + item["stage"]["suffix"]
+                if marker is not None:
+                    write_json(marker, {"outputs": [{"id": item["id"], "storage": item["storage"], "sha256": item["stage"]["sha256"]}
+                                                    for item in outputs], "committed": False})
+                with self.connect(write=True) as db:
+                    self.require_scope(db, project)
+                    self.require_chat(db, project, chat)
+                    if check:
+                        check(db)
+                    directory = self.files_directory(project, chat)
+                    for item in outputs:
+                        staged = item["stage"]
+                        previous = db.execute("SELECT * FROM artifact WHERE project_id=? AND id=?", (project, item["id"])).fetchone()
+                        if previous:
+                            if (previous["chat_id"] != chat or previous["step_id"] != step or previous["run_id"] != run_id
+                                    or previous["output_key"] != item["key"] or previous["kind"] != staged["kind"]
+                                    or previous["original_name"] != staged["filename"] or previous["sha256"] != staged["sha256"]):
+                                raise Problem("output_replay", "This output identity belongs to different bytes or owner.", 409)
+                            ids.append(item["id"])
+                            continue
+                        if step and db.execute("SELECT 1 FROM artifact WHERE project_id=? AND step_id=? AND output_key=?",
+                                               (project, step, item["key"])).fetchone():
+                            raise Problem("output_replay", "This step already saved a different output for this key.", 409)
+                        destination = child(directory, item["storage"])
+                        if destination.exists():
+                            if file_digest(destination) != staged["sha256"]:
+                                raise Problem("output_conflict", "An unregistered file with different bytes occupies the destination.", 409)
+                            staged["temp"].unlink(missing_ok=True)
+                        else:
+                            staged["temp"].replace(destination)
+                        placed.append(destination)
+                        db.execute("""INSERT INTO artifact (project_id,id,kind,app_id,app_version,original_name,storage_name,sha256,
+                            size_bytes,run_id,created_at,chat_id,step_id,role,media_type,output_key,title,origin_class)
+                            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            (project, item["id"], staged["kind"], item.get("app"), item.get("version"), staged["filename"],
+                             item["storage"], staged["sha256"], staged["size"], run_id, now(), chat, step, item.get("role"),
+                             MEDIA.get(staged["suffix"]), item["key"], (item.get("title") or None) and item["title"][:300],
+                             item.get("origin", "private_or_unknown")))
+                        for parent in item.get("parents", ()):
+                            self.add_parent(db, project, parent, item["id"])
+                        ids.append(item["id"])
+                    if entry:
+                        row = db.execute("SELECT result_ids FROM chat_entry WHERE id=? AND chat_id=?", (entry, chat)).fetchone()
+                        if not row:
+                            raise Problem("entry_missing", "Request not found in this chat.", 404)
+                        results = json.loads(row["result_ids"])
+                        results += [value for value in ids if value not in results]
+                        db.execute("UPDATE chat_entry SET result_ids=?, updated_at=? WHERE id=?", (json.dumps(results), now(), entry))
+                    if finalize:
+                        finalize(db, ids)
+                    db.execute("UPDATE chat SET updated_at=? WHERE id=?", (now(), chat))
+                placed = []
+                if marker is not None:
+                    data = read_json(marker, {}) or {}
+                    write_json(marker, data | {"committed": True})
+                return ids
+        finally:
+            for item in outputs:
+                staged = item.get("stage") or {}
+                if staged.get("temp"):
+                    staged["temp"].unlink(missing_ok=True)
+            for path in placed:
+                path.unlink(missing_ok=True)
+
+    def recover_publication(self, project, chat, marker):
+        """Remove only files that this attempt placed but never registered."""
+        data = read_json(marker, None)
+        if not data or data.get("committed"):
+            return
+        directory = self.files_directory(project, chat)
+        with self.writer, self.connect() as db:
+            for item in data.get("outputs", []):
+                path = child(directory, item["storage"])
+                registered = db.execute("SELECT 1 FROM artifact WHERE project_id=? AND id=?", (project, item["id"])).fetchone()
+                if not registered and path.is_file() and file_digest(path) == item["sha256"]:
+                    path.unlink()
+
+    @staticmethod
+    def add_parent(db, project, parent, child_id):
+        parent = id_value(parent)
+        if parent == child_id:
+            raise Problem("artifact_lineage", "An artifact cannot be its own parent.", 409)
+        if not db.execute("SELECT 1 FROM artifact WHERE project_id=? AND id=?", (project, parent)).fetchone():
+            raise Problem("artifact_lineage", "A parent artifact belongs to another scope.", 409)
+        cycle = db.execute("""WITH RECURSIVE up(id) AS (SELECT ? UNION SELECT p.parent_id FROM artifact_parent p
+                              JOIN up ON p.child_id=up.id WHERE p.project_id=?) SELECT 1 FROM up WHERE id=?""",
+                           (parent, project, child_id)).fetchone()
+        if cycle:
+            raise Problem("artifact_lineage", "Artifact lineage cannot contain a cycle.", 409)
+        db.execute("INSERT OR IGNORE INTO artifact_parent VALUES (?,?,?)", (project, parent, child_id))
+
+    def artifacts_for(self, project, chat=None, *, kinds=None, include_project=False):
+        """Picker listing: this chat, or this named project when requested. Trashed chats are hidden."""
+        with self.connect() as db:
+            scope = self.require_scope(db, project)
+            if chat:
+                self.require_chat(db, project, chat)
+            named = bool(db.execute("SELECT 1 FROM project WHERE id=?", (project,)).fetchone())
+            rows = db.execute("""SELECT a.* FROM artifact a LEFT JOIN chat c ON c.id=a.chat_id WHERE a.project_id=?
+                AND (a.chat_id IS NULL OR c.trash_state IS NULL) ORDER BY a.rowid""", (project,)).fetchall()
+            result = []
+            for row in rows:
+                if kinds and row["kind"] not in kinds:
+                    continue
+                if not (include_project and named) and row["chat_id"] != (chat or scope.get("scope_id")):
+                    continue
+                result.append(dict(row) | {"producer": {"ldr": "Local Deep Research", "gptr": "GPT Researcher",
+                                                        "pqa": "PaperQA2"}.get(row["app_id"], "RAH" if row["step_id"] else "Imported")})
+            return result
+

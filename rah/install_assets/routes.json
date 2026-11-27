@@ -1,41 +1,5 @@
 {
   "schema_version": 1,
-  "paper_profiles": {
-    "openrouter-text-v1": {
-      "status": "verified",
-      "reference": "PaperQA2 35-check installed-hub report and process trace, 2026-11-22 (see docs/integrations.md)",
-      "worker_sha256": "3f90ded02a30017649cec86f534680697f0223ed523262c65147c5df52b7e9c1",
-      "python": "3.12.14",
-      "upstream_version": "2026.8.12",
-      "policy": "single-provider-no-fallback",
-      "lock_sha256": [
-        "03fde5bf1872f2f7100b3c62238d477875ae022e80f5137de4653af6789eabe8",
-        "73c5159aa9fda38cda3d80de378268e46b7a8319ddd5c499c698e7189ad85308"
-      ],
-      "roles": {
-        "answer": {
-          "model": "openai/gpt-4.1-mini",
-          "provider": "Azure",
-          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
-        },
-        "summary": {
-          "model": "openai/gpt-4.1-mini",
-          "provider": "Azure",
-          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
-        },
-        "agent": {
-          "model": "openai/gpt-4.1-mini",
-          "provider": "Azure",
-          "endpoint": "https://openrouter.ai/api/v1/chat/completions"
-        },
-        "embedding": {
-          "model": "openai/text-embedding-3-small",
-          "provider": "Azure",
-          "endpoint": "https://openrouter.ai/api/v1/embeddings"
-        }
-      }
-    }
-  },
   "routes": [
     {
       "app_id": "ldr",
@@ -206,7 +170,11 @@
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
       "evidence_status": "candidate",
-      "paper_profile": "openrouter-text-v1"
+      "paper_routes": [
+        "pqa-budget-v1",
+        "pqa-standard-v1",
+        "pqa-premium-v1"
+      ]
     },
     {
       "app_id": "ldr",
@@ -377,7 +345,11 @@
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
       "evidence_status": "candidate",
-      "paper_profile": "openrouter-text-v1"
+      "paper_routes": [
+        "pqa-budget-v1",
+        "pqa-standard-v1",
+        "pqa-premium-v1"
+      ]
     },
     {
       "app_id": "ldr",
@@ -547,7 +519,11 @@
       "smoke_id": "pqa-installed-entry",
       "qualification_only": false,
       "evidence_status": "candidate",
-      "paper_profile": "openrouter-text-v1"
+      "paper_routes": [
+        "pqa-budget-v1",
+        "pqa-standard-v1",
+        "pqa-premium-v1"
+      ]
     }
   ]
 }
