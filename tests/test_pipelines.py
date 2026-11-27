@@ -311,6 +311,42 @@ def test_restart_interrupts_and_reuses_verified_output(hub):
     assert hub.get(run)["steps"][0]["state"] == "succeeded"
 
 
+def test_ldr_handoff_accepts_cold_start(hub):
+    hub.native.ldr_process.return_value = None
+    run, _ = hub.start("literature_review")
+    scope_to_brief(hub, run)
+    route = hub.settle(run, {"waiting_native"})["native_route"]
+    assert route["process"] == "Not running"
+    stopped_fingerprint = hub.pipes.ldr_route(route["prompt"])[0]
+
+    # The browser starts LDR before submitting the token from the stopped preview.
+    hub.native.ldr_process.return_value = {"generation": "g1", "stale": False}
+    data, status = hub.act(run, "launch_native", {"route_digest": route["digest"], "attest": True})
+    assert status == 200 and data["native"]["prefill_prepared"]
+    info = hub.native.open_ldr.call_args.args[0]
+    assert info["prompt"] == route["prompt"]
+    assert info["generation"] == "g1"
+    assert info["fingerprint"] == hub.pipes.ldr_route(route["prompt"])[0] != stopped_fingerprint
+
+
+@pytest.mark.parametrize("change", ["settings", "credentials", "stale_process", "replaced_process"])
+def test_ldr_handoff_rejects_changed_route(hub, change):
+    hub.native.ldr_process.return_value = {"generation": "g1", "stale": False} if change == "replaced_process" else None
+    run, _ = hub.start("literature_review")
+    scope_to_brief(hub, run)
+    route = hub.settle(run, {"waiting_native"})["native_route"]
+    if change == "settings":
+        hub.write_config("RAH_OPENROUTER_API_KEY=offline-key\nRAH_NATIVE_LDR__LDR_LLM_MODEL=changed-model\n")
+    elif change == "credentials":
+        hub.write_config("RAH_OPENROUTER_API_KEY=replacement-key\n")
+    hub.native.ldr_process.return_value = {"generation": "g2", "stale": change == "stale_process"}
+
+    with pytest.raises(Problem) as rejected:
+        hub.act(run, "launch_native", {"route_digest": route["digest"], "attest": True})
+    assert rejected.value.code == "stale_preview"
+    hub.native.open_ldr.assert_not_called()
+
+
 def literature_to_papers(hub, run):
     scope_to_brief(hub, run)
     data = hub.settle(run, {"waiting_native"})

@@ -163,6 +163,8 @@ def create_app(root, book, uv, identity, token, stop, address):
                 if not browser_alive("ldr"):
                     raise Problem("native_not_ready", "Start Local Deep Research, then open the handoff again.", 409)
                 service = services["ldr"]
+                if service["generation"] != info["generation"]:
+                    raise Problem("stale_preview", "The LDR route changed. Review it again.", 409)
                 state = browser_status("ldr", settings.load(root))
                 if state["state"] != "Ready":
                     raise Problem("native_not_ready", "Local Deep Research is still starting. Try again shortly.", 409)

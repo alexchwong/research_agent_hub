@@ -195,6 +195,10 @@ class Pipelines:
         return digest(canonical(payload)), scope_gate.preview(question) | {"available": True}
 
     def ldr_route(self, prompt):
+        payload, display = self._ldr_route(prompt)
+        return digest(canonical(payload)), display
+
+    def _ldr_route(self, prompt):
         config = self.config()
         route = self.book.route("ldr")
         if not route:
@@ -216,7 +220,7 @@ class Pipelines:
                    "process": "Running" if process else "Not running", "relaunch_needed": bool(process and process.get("stale")),
                    "attestation": "Native UI overrides are unobserved by RAH. Review the model and search settings inside "
                                   "LDR before you press Start.", "mode": "Programmatic SDK not enabled; native workflow"}
-        return digest(canonical(payload)), display
+        return payload, display
 
     def prices(self):
         try:
@@ -1187,8 +1191,14 @@ class Pipelines:
         brief = json.loads(run["brief_json"])
         prompt = brief["public_prompts"][current["step_key"]]
         with self.config_lock:
-            fingerprint, display = self.ldr_route(prompt)
-        if fingerprint != preview["fingerprint"]:
+            payload, display = self._ldr_route(prompt)
+        fingerprint = digest(canonical(payload))
+        generation = payload["process"]
+        # The browser starts LDR before submitting the review. Only a stopped preview
+        # with otherwise identical inputs can transition to a fresh process this way.
+        cold_start = (generation is not None and not display["relaunch_needed"]
+                      and digest(canonical(payload | {"process": None})) == preview["fingerprint"])
+        if fingerprint != preview["fingerprint"] and not cold_start:
             raise Problem("stale_preview", "The LDR route changed. Review it again.", 409)
         self.native.check_single(current["id"])
         reopen = body.get("reopen") is True
@@ -1200,7 +1210,7 @@ class Pipelines:
             self.finish_action(db, scope, chat, run, "launch_native", action_id, body)
         opened = self.native.open_ldr({"scope": scope, "chat": chat, "entry": current["entry_id"], "step": current["id"],
                                        "run": run["id"], "attempt": current["attempt"], "fingerprint": fingerprint,
-                                       "formats": formats, "prompt": "" if reopen else prompt})
+                                       "generation": generation, "formats": formats, "prompt": "" if reopen else prompt})
         with self.projects.connect(write=True) as db:
             self.set_step(db, current["id"], "waiting_native", route_fingerprint=fingerprint,
                           entry_label="Opened" if opened.get("opened") else "Waiting for native step")
