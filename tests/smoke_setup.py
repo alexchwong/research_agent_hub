@@ -188,7 +188,7 @@ def smoke(root, uv, bundle, shortcut, real, packaged=False, *, report):
                 env=clean_env() | {"LITELLM_LOCAL_MODEL_COST_MAP": "True"}, timeout=120)
             fixture = root / "upstream-sample.ris"
             fixture.write_bytes(export)
-            assert structured_citations(fixture)[0]["pmid"] == "123456"
+            assert structured_citations(fixture).rows[0]["pmid"] == "123456"
             print("Imported RIS emitted by pinned LDR.", flush=True)
         assert {row["id"] for row in api("/apps") if row["version"]} == set(names)
         cli_run(*remover)

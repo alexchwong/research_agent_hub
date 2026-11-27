@@ -3,7 +3,15 @@
 Model, embedding and retriever traffic is intercepted at the installed package transports (httpx for the
 OpenAI-compatible clients, requests for the PubMed Central retriever). No production endpoint is overridden and
 real sockets are blocked. Writes a JSON report of effective settings and observed request bodies.
+
+With --observer the CLI runs under RAH's OpenRouter usage observer, which hooks Client.send above these transports.
+--compare takes the report of a run without the observer: outputs, request bodies and effective settings must be
+byte-identical, and the observer's line count must equal the chat plus embeddings requests counted here. The probe
+exits non-zero on failure.
 """
+import hashlib
+import importlib.util
+import re
 import argparse
 import json
 import os
@@ -13,6 +21,15 @@ import socket
 import sys
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+
+
+VOLATILE = re.compile(r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?([+-]\d{2}:?\d{2}|Z)?"
+                      r"|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+
+
+def stable(text):
+    """Digest with the upstream's own clock values and run IDs masked: they differ between any two runs."""
+    return hashlib.sha256(VOLATILE.sub("<volatile>", text).encode()).hexdigest()
 
 
 def blocked(*args, **kwargs):
@@ -30,7 +47,10 @@ def main():
     parser.add_argument("--env", type=Path, required=True, help="JSON object of the guided projection to apply")
     parser.add_argument("--report", type=Path, required=True)
     parser.add_argument("--mode", default="research_report")
+    parser.add_argument("--observer", action="store_true", help="Run the CLI under rah/openrouter_observer.py")
+    parser.add_argument("--compare", type=Path, help="Report of the same run without the observer")
     args = parser.parse_args()
+    bodies = []
     env = json.loads(args.env.read_text())
     observed = {"chat": [], "embeddings": [], "retriever": [], "other": []}
     import httpx
@@ -44,6 +64,8 @@ def main():
         module = httpx2 if httpx2 and isinstance(request, httpx2.Request) else httpx
         url = str(request.url)
         body = json.loads(request.content or b"{}")
+        if url.startswith("https://openrouter.ai/"):
+            bodies.append(stable((request.content or b"").decode(errors="replace")))
         if url == "https://openrouter.ai/api/v1/chat/completions":
             observed["chat"].append({"model": body.get("model"), "max_tokens": body.get("max_tokens"),
                                      "max_completion_tokens": body.get("max_completion_tokens"),
@@ -124,6 +146,16 @@ def main():
                     patch.object(tiktoken, "encoding_for_model", lambda name: Tokens())]
         for item in patches:
             item.start()
+        usage_log = Path(work) / "usage.jsonl"
+        if args.observer:
+            path = Path(__file__).resolve().parents[1] / "rah" / "openrouter_observer.py"
+            spec = importlib.util.spec_from_file_location("openrouter_observer", path)
+            observer = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(observer)
+            log = observer.Log(str(usage_log))
+            for module in (httpx, httpx2):
+                if module:
+                    observer.install(module, log)
         with \
                 patch.object(requests.Session, "send", requests_send), patch.object(socket.socket, "connect", blocked), \
                 patch.object(socket, "getaddrinfo", blocked):
@@ -135,6 +167,8 @@ def main():
                 status, error = "failed", type(exception).__name__
         outputs = sorted(path.name for path in (Path(work) / "outputs").glob("*.md")) if (Path(work) / "outputs").exists() else []
         frontmatter = (Path(work) / "outputs" / outputs[0]).read_text().split("---")[1] if outputs else ""
+        output_digests = sorted(stable((Path(work) / "outputs" / name).read_text(errors="replace")) for name in outputs)
+        lines = [json.loads(line) for line in usage_log.read_text().splitlines()] if usage_log.exists() else []
     from gpt_researcher.config.config import Config
     os.environ.update(env)
     config = Config()
@@ -144,8 +178,22 @@ def main():
         "IMAGE_GENERATION_ENABLED", "MCP_STRATEGY")}
     report = {"status": status, "error": error, "outputs": outputs, "frontmatter_has_sources_count": "sources_count" in frontmatter,
               "effective": effective, "fast": config.fast_llm, "smart": config.smart_llm, "strategic": config.strategic_llm,
-              "embedding": config.embedding, "retrievers": config.retrievers, "observed": observed}
+              "embedding": config.embedding, "retrievers": config.retrievers, "observed": observed,
+              "observer": args.observer, "request_body_sha256": sorted(bodies), "output_sha256": output_digests,
+              "observer_lines": len(lines), "observer_reasons": sorted({str(line.get("reason")) for line in lines})}
+    checks = {"run_passed": status == "passed"}
+    if args.observer:
+        checks["counts_equal"] = len(lines) == len(observed["chat"]) + len(observed["embeddings"]) and len(lines) > 0
+    if args.compare:
+        baseline = json.loads(args.compare.read_text())
+        checks["request_bodies_identical"] = baseline["request_body_sha256"] == report["request_body_sha256"]
+        checks["outputs_identical"] = baseline["output_sha256"] == report["output_sha256"]
+        checks["effective_identical"] = json.dumps(baseline["effective"], sort_keys=True, default=str) == \
+            json.dumps(json.loads(json.dumps(effective, default=str)), sort_keys=True)
+    report["checks"] = checks
+    report["passed"] = all(checks.values())
     args.report.write_text(json.dumps(report, indent=2, default=str))
+    raise SystemExit(0 if report["passed"] else 1)
 
 
 if __name__ == "__main__":

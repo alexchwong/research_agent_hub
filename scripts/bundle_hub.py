@@ -29,7 +29,7 @@ def build_wheel(uv, wheelhouse):
             shutil.copyfile(REPO / name, source / name)
         package = source / "rah"
         shutil.copytree(REPO / "rah", package,
-                        ignore=shutil.ignore_patterns("__pycache__", "*.py[co]", ".DS_Store"))
+                        ignore=shutil.ignore_patterns("__pycache__", "*.py[co]", ".DS_Store", ".gitignore"))
         expected = {path.relative_to(source).as_posix(): hashlib.sha256(path.read_bytes()).digest()
                     for path in package.rglob("*") if path.is_file()}
 

@@ -12,7 +12,7 @@ bash scripts/setup-dev.sh --verify
 ./.release-test/bin/rah
 ```
 
-1. **Set up:** Prepare `.venv` with uv 0.13.9 and the locked dev tools, then build and install the wheel in a separate environment at `.release-test/current/installed-hub`. If the matching interpreter is not on `PATH`, set `RAH_DEV_PYTHON` to its absolute executable path before a fresh setup. An existing `.venv` must use Python 3.12.14. Rerun setup after changing package code to refresh the installed wheel; quit the dev hub first if it is running. Old builds are retained and can be removed when no longer in use. Setup does not start the hub or install the upstream apps.
+1. **Set up:** Prepare `.venv` with uv 0.13.9 and the locked dev tools, then build and install the wheel in a separate environment at `.release-test/current/installed-hub`. If the matching interpreter is not on `PATH`, set `RAH_DEV_PYTHON` to its absolute executable path before a fresh setup. An existing `.venv` must use Python 3.12.14. **Every successful rerun permanently deletes old shell dev builds and the entire `.release-test/manual-data` workspace**, including dev chats, settings, credentials, and upstream app installs. Quit the dev hub and its native apps first. A failed replacement build leaves the old install and workspace intact. Setup does not touch your normal RAH workspace or start the hub; the next launch provisions the upstream apps again.
 2. **Verify:** Run the offline pytest suite, JavaScript syntax checks, and the fixture and packaged-upstream smokes against the previously installed wheel. Verification does not rebuild the wheel, modify the manual workspace, or create shortcuts. It needs no provider credentials; the packaged smoke may need network access for uncached locked dependencies and needs a temporary directory with adequate free space (set `TMPDIR` if needed). See [Installed-package verification](#installed-package-verification) for report details.
 3. **Start:** Run the installed hub in the current terminal with data under `.release-test/manual-data`, separate from your normal RAH workspace. First launch provisions the three pinned apps and may need network access. Later launches keep current apps. To stop the hub, press **Ctrl+C** in the terminal that started it or close that console window. This can interrupt active operations. If provisioning is incomplete, retry in **App details**, or stop the dev hub and rerun the launcher. No desktop shortcut is created. Pass `--no-browser` for a headless launch.
 
@@ -107,13 +107,17 @@ On Windows PowerShell:
 
 Use the ZIP and detached checksum as candidate artifacts. Verify the normal desktop entry on each target. One confirmation provisions the hub and all three apps. Check first launch, shortcut, Ctrl+C and console-close shutdown, restart and reinstallation with existing data.
 
-`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root and any separate workspace before exercising an in-place upgrade. The base schema and initial workspace migration are followed by `rah/workspace_v3.sql` (SQLite `user_version=2`) and `rah/workspace_schema_3.sql` (`user_version=3`). Normal project paths and paper edit revisions are preserved. See [Workspace schema 3 upgrade and downgrade](#workspace-schema-3-upgrade-and-downgrade). Unfiled chat folder relocation resumes on startup if interrupted.
+`rah setup` provisions core installations and can reuse a recorded absolute uv path. The workspace exposes targeted retries in **App details**. `rah serve` starts the local service and `rah open` opens an existing workspace. Back up the private data root and any separate workspace before exercising an in-place upgrade. The base schema and initial workspace migration are followed by `rah/workspace_v3.sql` (SQLite `user_version=2`), `rah/workspace_schema_3.sql` (`user_version=3`) and `rah/workspace_schema_4.sql` (`user_version=4`). Normal project paths and paper edit revisions are preserved. See [Workspace schema 3 upgrade and downgrade](#workspace-schema-3-upgrade-and-downgrade). Unfiled chat folder relocation resumes on startup if interrupted.
 
 ## Workspace schema 3 upgrade and downgrade
 
 Startup checks the stored SQLite `user_version` before touching workspace files. A newer version is refused. The chain runs `schema.sql`, `workspace.sql`, `workspace_v3.sql` (`user_version=2`) and then `rah/workspace_schema_3.sql` (`user_version=3`). Before schema 3, RAH holds a reserved write lock, writes a backup through the SQLite backup API to `hub/backups/state-pre-v3-<timestamp>.sqlite3`, runs `integrity_check` on it and records its version and SHA-256 beside it. The rebuild runs with foreign keys off inside one `BEGIN IMMEDIATE` transaction and copies rows by column. It checks row counts, preserved IDs, `foreign_key_check` and `integrity_check` before committing, then checks again on reopen. Any mismatch rolls back and stops startup with the backup location. No file or folder moves.
 
 To downgrade: stop the hub, keep a copy of the current data root (schema 3 changes made after the backup cannot be represented in schema 2), then replace `hub/state.sqlite3` with the pre-v3 backup and restore the workspace files from the same point in time. Do not run older code against an upgraded database.
+
+## Workspace schema 4
+
+The 3→4 step runs `rah/workspace_schema_4.sql` in one `BEGIN IMMEDIATE` transaction with `foreign_key_check`, `integrity_check` and a version check before commit. It adds `chat_entry.usage_json` (valid JSON, at most 8 KiB) and closes in-flight work: nonterminal steps become `cancelled` with `error_code='upgrade'`, their entries `Cancelled`, other active entries `Interrupted`, and nonterminal runs `cancelled`. There is no backup and no downgrade path (owner decision); newer versions are still refused.
 
 ## Purpose pipeline verification
 
@@ -130,6 +134,24 @@ These run offline with the installed native environments and write JSON reports.
 # LDR RIS emitter, open-access downloader contract and programmatic quick_summary feasibility.
 (cd tests && "$LDR_VENV/bin/python" probe_ldr_feasibility.py --report ../reports/p0-ldr.json)
 ```
+
+### Chat-first probes (spec v2 §8.2)
+
+```bash
+# Headless LDR through the RAH runner and observer (gate for the guided LDR route). Exits non-zero on failure.
+"$LDR_VENV/bin/python" -I tests/probe_ldr_headless.py --report reports/ldr-headless.json --rah-python .venv/bin/python --keep reports/ldr-headless
+# GPT Researcher under the usage observer: run once without, then with --observer --compare, for each mode.
+"$GPTR_VENV/bin/python" tests/probe_gptr_survey.py --source "$GPTR_INSTALL/source" --env /tmp/survey-env.json --mode deep --report reports/gptr-deep.json
+"$GPTR_VENV/bin/python" tests/probe_gptr_survey.py --source "$GPTR_INSTALL/source" --env /tmp/survey-env.json --mode deep --observer --compare reports/gptr-deep.json --report reports/gptr-deep-observer.json
+# PaperQA2 routes under the observer (guard before observer; observer lines equal transport requests).
+(cd tests && "$PQA_VENV/bin/python" probe_paper_transport.py --worker ../rah/pqa_profile_worker.py --route pqa-standard-v1 --observer --report ../reports/pqa-standard-observer.json)
+```
+
+The GPT Researcher comparison masks the upstream's own clock values and run UUIDs, which differ between any two runs. Report results under exactly one evidence label: **offline behavioural contract passed**, **installed pinned-upstream probe passed** (with wheel or lock hash, host, Python and mode) or **live route qualified** (P6). A lower tier never covers a higher one.
+
+**Usage coverage.** `usage.COVERAGE` ships empty. A route's entry `(app, mode, lock_sha256, observer_sha256)` is added only from a passing installed probe report (`coverage_entry` in the LDR report), after checking that the venv was installed from exactly that lock, and with owner approval, in the same way PaperQA2 routes are enabled. Any change to the observer bytes or lock invalidates the entry. `FIXED_HOSTS` in `rah/ldr_pipeline.py` is likewise updated only from probe evidence; an unlisted fixed host fails the probe.
+
+**P6 additions.** `ldr_headless`: one Literature review discovery on a fixed public synthetic question with PubMed, recording duration, callback shapes and counts, usable citations and non-empty usage. `usage_accuracy`: up to 10 observed generation IDs checked against `GET /api/v1/generation?id=…` (tokens exact, cost within 1e-9 USD). Re-run PaperQA2 route qualification on the observed worker.
 
 `$GPTR_INSTALL`, `$GPTR_VENV`, `$PQA_VENV` and `$LDR_VENV` are the active `apps/<app>/versions/<install-id>` directory and its `venv` in a disposable data root. The offline pytest suite covers P1–P5 with fake transports and a fake GPT Researcher CLI.
 

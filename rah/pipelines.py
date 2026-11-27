@@ -3,7 +3,7 @@
 RAH stores the question, approvals, step state, inputs and original outputs. The upstream apps do the
 research. The recipe table below is fixed in code: no model decides which step or tool runs next.
 """
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hmac
 import io
 import json
@@ -13,11 +13,13 @@ import secrets
 import shutil
 from threading import Condition, Lock, Thread
 from time import monotonic
-from uuid import UUID, uuid4
+from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
-from . import gptr_pipeline, installer, oa, pqa_profiles, research_profiles, scope_gate, search_sources, settings, upstreams
+from . import gptr_pipeline, installer, ldr_pipeline, oa, pqa_profiles, research_profiles, scope_gate, search_sources, settings, upstreams
+from . import usage
 from .common import Problem, atomic, canonical, child, digest, file_digest, id_value, private_directory, read_json, venv_python
-from .projects import citations, now, structured_citations
+from .projects import citations, now, structured_citations, usable_citation
 
 
 RECIPE_VERSION = 1
@@ -33,13 +35,25 @@ PURPOSES = {"literature_review": "Literature review", "deep_research": "Deep res
 STEPS = {
     "survey": ("gptr", "managed", "gptr"), "scope_gate": ("rah", "checkpoint", "scope_gate"),
     "gptr_deep": ("gptr", "managed", "gptr"), "gptr_rapid": ("gptr", "managed", "gptr"),
-    "gptr_comparison": ("gptr", "managed", "gptr"), "ldr_discovery": ("ldr", "native", "ldr"),
-    "ldr_comparison": ("ldr", "native", "ldr"), "papers": ("rah", "checkpoint", None),
+    "gptr_comparison": ("gptr", "managed", "gptr"), "ldr_discovery": ("ldr", "managed", "ldr"),
+    "ldr_comparison": ("ldr", "managed", "ldr"), "papers": ("rah", "checkpoint", None),
     "paper_selection": ("rah", "checkpoint", None), "paper_analysis": ("pqa", "managed", "pqa"),
 }
 REPORT_MODES = {"gptr_deep": ("deep", "deep"), "gptr_rapid": ("research_report", "rapid"),
                 "gptr_comparison": ("research_report", "comparison")}
 PUBLIC_STEPS = {"gptr_deep", "gptr_rapid", "gptr_comparison", "ldr_discovery", "ldr_comparison"}
+LDR_STEPS = ("ldr_discovery", "ldr_comparison")
+MANAGED_STEPS = ("survey", "scope_gate", *REPORT_MODES, *LDR_STEPS)
+DEADLINES = {"survey": gptr_pipeline.DEADLINES["survey"], "scope_gate": scope_gate.DEADLINE,
+             "gptr_rapid": gptr_pipeline.DEADLINES["research_report"], "gptr_comparison": gptr_pipeline.DEADLINES["research_report"],
+             "gptr_deep": gptr_pipeline.DEADLINES["deep"], "ldr_discovery": ldr_pipeline.DEADLINE,
+             "ldr_comparison": ldr_pipeline.DEADLINE, "paper_analysis": 600}
+HEARTBEAT = 5
+COMPONENT_LABELS = {"install": "installed app", "lock": "installed app", "models": "model", "model": "model",
+                    "settings": "LDR model or search settings", "retriever": "search service", "search_url": "search service",
+                    "credentials": "saved key", "credential": "saved key", "prompt": "approved prompt", "runner": "RAH runner",
+                    "endpoint": "endpoint", "routing": "endpoint", "mode": "report mode", "operation": "report mode",
+                    "max": "request limit", "app": "app"}
 PARTIAL = {"literature_review": "discovery_only", "deep_research": "report_only"}
 TERMINAL_STEP = {"succeeded", "failed", "cancelled", "skipped"}
 TERMINAL_RUN = {"succeeded", "failed", "cancelled"}
@@ -49,15 +63,11 @@ DISPLAY = {"queued": "Queued", "surveying": "Surveying", "running": "Running", "
            "reconfirm_recipients": "Awaiting recipient re-confirmation", "paused": "Paused", "interrupted": "Interrupted",
            "succeeded": "Complete", "failed": "Failed", "cancelled": "Cancelled", "skipped": "Skipped"}
 PREVIEW_TTL = 600
-CONSENT_TTL = timedelta(hours=24)
-GRANT_TTL = 8 * 3600
-EXPORT_NAMES = {"report": ("ldr_report", ".md"), "citations": ("ldr_citations", ".ris")}
 ACTIONS = {
     "ask_more": {"round_id", "answers"}, "preview_scope": {"answers", "instructions", "broad"},
-    "approve_scope": {"digest", "constraints_reviewed"}, "use_survey_result": set(),
-    "launch_native": {"route_digest", "attest", "reopen"}, "confirm_native_result": {"artifact_ids", "attribution", "public_provenance", "same_result"},
+    "approve_scope": {"digest"}, "use_survey_result": set(),
     "set_papers": {"source_artifact_id", "rows"}, "start_acquisition": {"paper_ids"},
-    "approve_private_lookup": {"paper_id", "stage", "digest", "approve"},
+    "approve_private_lookups": {"paper_ids", "digest"},
     "select_corpus": {"pdf_ids", "analysis_question", "excerpt", "route_id"}, "finish_partial": set(),
     "reconfirm_route": {"digest"}, "pause": set(), "resume": set(), "cancel": set(),
     "reuse_output": {"digest"}, "rerun": {"confirm_charges"},
@@ -79,13 +89,11 @@ class Pipelines:
         self.root, self.book, self.projects, self.jobs, self.runs = root, book, projects, jobs, runs
         self.provider = provider
         self.config_lock = config_lock or Lock()
-        self.generation = secrets.token_hex(16)
         self.previews = {}
         self.lock = Lock()
         self.wake = Condition()
         self.closing = False
         self.thread = None
-        self.native = None
         self.folder = private_directory(child(root, "hub", "runs", "guided"))
         runs.guided = self
         self.key = self.route_key()
@@ -183,44 +191,57 @@ class Pipelines:
         if operation == "survey":
             display["controls"] = {"query_target": "1 generated query (target, not a ceiling)", "results_per_query": 3,
                                    "per_request_output_tokens": 2048, "report_words": 400}
-        return digest(canonical(payload)), display, (install, stored["env"], key)
+        return digest(canonical(payload)), display, (install, stored["env"], key), payload
 
     def gate_route(self, question):
         key = self.config().values.get("RAH_OPENROUTER_API_KEY")
         if not key:
             return None, {"available": False, "reason": "Add the shared OpenRouter key to use the Scope Gate. "
-                          "Editable generic questions will be shown instead."}
+                          "Editable generic questions will be shown instead."}, {}
         payload = {"endpoint": scope_gate.ENDPOINT, "model": scope_gate.MODEL, "max": scope_gate.MAX_COMPLETION_TOKENS,
                    "credential": self.identity(key), "prompt": digest(question.encode())}
-        return digest(canonical(payload)), scope_gate.preview(question) | {"available": True}
+        return digest(canonical(payload)), scope_gate.preview(question) | {"available": True}, payload
 
     def ldr_route(self, prompt):
-        payload, display = self._ldr_route(prompt)
-        return digest(canonical(payload)), display
+        """Headless LDR route: (fingerprint, display, (install, env), components). Raises ldr_headless_unavailable."""
+        return ldr_pipeline.route(self.root, self.book, self.config(), prompt, self.identity)
 
-    def _ldr_route(self, prompt):
-        config = self.config()
-        route = self.book.route("ldr")
-        if not route:
-            raise Problem("unverified_route", "Local Deep Research has no supported route on this host.", 503)
-        install = upstreams.current(self.root, "ldr", self.book)
+    def step_route(self, run, key, prompt):
+        """(fingerprint, display, components) for one downstream public step."""
+        if key in LDR_STEPS:
+            fingerprint, display, _, components = self.ldr_route(prompt)
+        else:
+            mode, operation = REPORT_MODES[key]
+            fingerprint, display, _, components = self.gptr_route(operation, run["selected_profile"], prompt, mode)
+        return fingerprint, display, components
+
+    def public_start(self, profile="standard"):
+        """Question-independent display of the public start recipients, for the one-click composer."""
         try:
-            effective = settings.resolve(config, "ldr", self.book.capabilities("ldr"))
-        except Problem:
-            effective = {"env": {}, "models": {}}
-        env = effective["env"]
-        process = self.native.ldr_process() if self.native else None
-        observed = {"provider": env.get("LDR_LLM_PROVIDER"), "model": env.get("LDR_LLM_MODEL"),
-                    "search": env.get("LDR_SEARCH_TOOL"), "searx": env.get(search_sources.URL_FIELDS["ldr"])}
-        payload = {"app": "ldr", "install": install.name, "lock": route["lock_sha256"], "settings": observed,
-                   "credentials": {name: self.identity(env[name]) for name in env if name.endswith("_KEY")},
-                   "process": (process or {}).get("generation"), "prompt": digest(prompt.encode())}
-        display = {"app": "Local Deep Research", "version": route["upstream_version"],
-                   "configured": {key: value for key, value in observed.items() if value},
-                   "process": "Running" if process else "Not running", "relaunch_needed": bool(process and process.get("stale")),
-                   "attestation": "Native UI overrides are unobserved by RAH. Review the model and search settings inside "
-                                  "LDR before you press Start.", "mode": "Programmatic SDK not enabled; native workflow"}
-        return payload, display
+            with self.config_lock:
+                _, survey, _, _ = self.gptr_route("survey", profile, "")
+                _, gate, _ = self.gate_route("")
+        except Problem as error:
+            return {"available": False, "code": error.code, "reason": str(error)}
+        return self.start_display(survey, gate) | {"available": True}
+
+    @staticmethod
+    def start_display(survey, gate):
+        gate = {key: value for key, value in gate.items() if key != "question_digest"}
+        return {"survey": survey, "scope_gate": gate, "display_digest": digest(canonical({"survey": survey, "scope_gate": gate}))}
+
+    @staticmethod
+    def changed(old, new):
+        """Name the material route dimensions that differ, without exposing values."""
+        if not isinstance(old, dict) or not isinstance(new, dict):
+            return None
+        labels = []
+        for key in sorted(set(old) | set(new)):
+            if old.get(key) != new.get(key):
+                label = COMPONENT_LABELS.get(key, key.replace("_", " "))
+                if label not in labels:
+                    labels.append(label)
+        return labels
 
     def prices(self):
         try:
@@ -269,7 +290,6 @@ class Pipelines:
         db.execute(f"UPDATE pipeline_run SET {','.join(assignments)} WHERE id=?", (*values, run_id))
 
     def set_step(self, db, step_id, state, **values):
-        entry_label = values.pop("entry_label", None)
         values = {key: json.dumps(value, ensure_ascii=False) if key == "detail_json" else value for key, value in values.items()}
         if state in TERMINAL_STEP:
             values.setdefault("finished_at", now())
@@ -277,8 +297,6 @@ class Pipelines:
         db.execute(f"UPDATE pipeline_step SET {','.join(columns)} WHERE id=?", (state, now(), *values.values(), step_id))
         row = self.step(db, step_id)
         label = DISPLAY[state]
-        if row["step_key"] in ("ldr_discovery", "ldr_comparison") and state == "waiting_native" and entry_label:
-            label = entry_label
         reason = values.get("error_detail") if state in ("failed", "paused", "interrupted", "reconfirm_recipients", "waiting_app") else None
         db.execute("UPDATE chat_entry SET state=?, reason=?, operation_id=COALESCE(?, operation_id), updated_at=? WHERE id=?",
                    (label, reason, values.get("operation_id"), now(), row["entry_id"]))
@@ -309,14 +327,12 @@ class Pipelines:
         db.execute("UPDATE chat SET updated_at=? WHERE id=?", (stamp, run["chat_id"]))
         return step_id
 
-    def approve(self, db, run_id, kind, payload, *, step=None, fingerprint=None, display=None, decision="approved", ttl=None):
+    def approve(self, db, run_id, kind, payload, *, step=None, fingerprint=None, display=None, decision="approved"):
         approval = str(uuid4())
-        stamp = utc()
         db.execute("""INSERT INTO pipeline_approval (id,run_id,step_id,kind,payload_digest,route_fingerprint,display_json,
-                      decision,decided_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                      decision,decided_at,expires_at) VALUES (?,?,?,?,?,?,?,?,?,NULL)""",
                    (approval, run_id, step, kind, payload if isinstance(payload, str) else digest(canonical(payload)),
-                    fingerprint, json.dumps((display or {}) | {"generation": self.generation}, ensure_ascii=False),
-                    decision, stamp.isoformat(), (stamp + ttl).isoformat() if ttl else None))
+                    fingerprint, json.dumps(display or {}, ensure_ascii=False), decision, utc().isoformat()))
         return approval
 
     def paused_requested(self, db, run_id):
@@ -346,9 +362,10 @@ class Pipelines:
             self.new_attempt(db, run, position, "queued", question=prompt)
             self.bump(db, run_id, "queued")
             self.notify()
-        elif key in ("ldr_discovery", "ldr_comparison"):
-            self.new_attempt(db, run, position, "waiting_native", question=prompt)
-            self.bump(db, run_id, "waiting_native")
+        elif key in LDR_STEPS:
+            self.new_attempt(db, run, position, "queued", question=prompt)
+            self.bump(db, run_id, "queued")
+            self.notify()
         elif key in ("papers", "paper_selection"):
             self.new_attempt(db, run, position, "awaiting_papers")
             self.bump(db, run_id, "awaiting_papers")
@@ -382,40 +399,46 @@ class Pipelines:
     # ---- consent checks ---------------------------------------------------------------------------
 
     def consent(self, db, step):
-        """Return None if public consent is current for this attempt, else a reason to re-confirm."""
+        """Return (None, fingerprint) if public consent is current for this attempt, else (reason, fingerprint).
+
+        There is no expiry by elapsed time or hub restart: consent stays current while the full route fingerprint is
+        unchanged. A material route or payload change requires re-confirmation, naming what changed.
+        """
         run = self.run_row(db, step["run_id"])
         key = step["step_key"]
         if key in ("survey", "scope_gate"):
             base = db.execute("SELECT * FROM pipeline_approval WHERE run_id=? AND kind='public_start' AND decision='approved' ORDER BY rowid DESC LIMIT 1",
                               (run["id"],)).fetchone()
             question = run["original_question"]
-            current = (self.gptr_route("survey", run["selected_profile"], question)[0] if key == "survey"
-                       else self.gate_route(question)[0])
+            if key == "survey":
+                current, _, _, components = self.gptr_route("survey", run["selected_profile"], question)
+            else:
+                current, _, components = self.gate_route(question)
             expected = json.loads(base["route_fingerprint"]).get(key) if base else None
+            approved = json.loads(base["display_json"]).get("components", {}).get(key) if base else None
         else:
             brief = json.loads(run["brief_json"] or "{}")
             base = db.execute("SELECT * FROM pipeline_approval WHERE run_id=? AND kind='scope' AND decision='approved' ORDER BY rowid DESC LIMIT 1",
                               (run["id"],)).fetchone()
             prompt = brief.get("public_prompts", {}).get(key, "")
-            mode = REPORT_MODES[key]
-            current = self.gptr_route(mode[1], run["selected_profile"], prompt, mode[0])[0]
-            expected = brief.get("routes", {}).get(key, {}).get("fingerprint")
+            current, _, components = self.step_route(run, key, prompt)
+            route = brief.get("routes", {}).get(key, {})
+            expected, approved = route.get("fingerprint"), route.get("components")
         override = db.execute("""SELECT * FROM pipeline_approval WHERE step_id=? AND kind='reconfirm' AND decision='approved'
                                  ORDER BY rowid DESC LIMIT 1""", (step["id"],)).fetchone()
-        for approval, fingerprint in ((override, override["route_fingerprint"] if override else None), (base, expected)):
-            if not approval:
-                continue
-            display = json.loads(approval["display_json"])
-            fresh = datetime.fromisoformat(approval["decided_at"]) + CONSENT_TTL > utc()
-            if fingerprint == current and display.get("generation") == self.generation and fresh:
-                return None, current
+        if override and override["route_fingerprint"] == current:
+            return None, current
+        if base and expected == current:
+            return None, current
         if not base:
             return "No public approval is recorded for this stage.", current
-        if expected != current:
-            return "The model, search service, credential or installed app changed since approval.", current
-        if json.loads(base["display_json"]).get("generation") != self.generation:
-            return "RAH restarted since approval. Review the recipients again before any new charges.", current
-        return "The public approval is older than 24 hours. Review the same route again.", current
+        if override:
+            approved = json.loads(override["display_json"]).get("components") or approved
+        labels = self.changed(approved, components)
+        if labels:
+            what = ", ".join(labels)
+            return f"The {what} changed since approval. Review the recipients again.", current
+        return "The approved route changed since approval. Review the recipients again.", current
 
     # ---- public API: preview and create ----------------------------------------------------------------
 
@@ -430,15 +453,17 @@ class Pipelines:
         with self.projects.connect() as db:
             self.projects.require_chat(db, scope, chat)
         with self.config_lock:
-            survey_fp, survey, _ = self.gptr_route("survey", profile, question)
-            gate_fp, gate = self.gate_route(question)
+            survey_fp, survey, _, survey_parts = self.gptr_route("survey", profile, question)
+            gate_fp, gate, gate_parts = self.gate_route(question)
         prices = self.prices()
         models = sorted(set(survey["models"].values()) | {scope_gate.MODEL})
         payload = {"kind": "public_start", "purpose": purpose, "profile": profile, "question": question,
-                   "fingerprints": {"survey": survey_fp, "scope_gate": gate_fp}, "scope": scope, "chat": chat}
+                   "fingerprints": {"survey": survey_fp, "scope_gate": gate_fp}, "scope": scope, "chat": chat,
+                   "components": {"survey": survey_parts, "scope_gate": gate_parts}}
         token = self.remember(payload)
         return {"digest": token, "question": question, "purpose": purpose, "purpose_label": PURPOSES[purpose], "profile": profile,
                 "survey": survey, "scope_gate": gate, "expires_in": PREVIEW_TTL,
+                "display_digest": self.start_display(survey, gate)["display_digest"],
                 "pricing": {"models": {model: prices["models"].get(model) for model in models},
                             "refreshed_at": prices.get("refreshed_at"),
                             "note": "Advertised OpenRouter prices per million tokens where cached. RAH sets no spending ceiling."},
@@ -498,8 +523,8 @@ class Pipelines:
             run = self.run_row(db, run_id)
             self.new_attempt(db, run, 0, "queued", question=question)
             self.approve(db, run_id, "public_start", {"question": question, "purpose": purpose, "profile": profile},
-                         fingerprint=json.dumps(preview["fingerprints"]), display={"question_digest": digest(question.encode())},
-                         ttl=CONSENT_TTL)
+                         fingerprint=json.dumps(preview["fingerprints"]),
+                         display={"question_digest": digest(question.encode()), "components": preview["components"]})
             if len(question.strip().splitlines()[0]) and db.execute("SELECT title FROM chat WHERE id=?", (chat,)).fetchone()["title"] == "New chat":
                 db.execute("UPDATE chat SET title=? WHERE id=?", (question.strip().splitlines()[0][:160], chat))
             result = self.run_data(db, self.run_row(db, run_id))
@@ -525,7 +550,7 @@ class Pipelines:
             self.dispatch(row, resource)
 
     def dispatch(self, row, resource):
-        app = {"gptr": "gptr", "scope_gate": None}.get(resource)
+        app = {"gptr": "gptr", "ldr": "ldr", "scope_gate": None}.get(resource)
         reason = None
         if self.jobs.busy(resource) or self.jobs.busy("core") or (app and self.jobs.busy(app)):
             reason = "Waiting for the app's current operation to finish."
@@ -555,7 +580,8 @@ class Pipelines:
                 self.set_step(db, row["id"], "reconfirm_recipients", error_detail=problem, route_fingerprint=fingerprint)
                 self.bump(db, row["run_id"], "reconfirm_recipients")
                 return None
-        task = {"survey": self.survey_task, "scope_gate": self.gate_task}.get(row["step_key"], self.report_task)
+        task = {"survey": self.survey_task, "scope_gate": self.gate_task, "ldr_discovery": self.ldr_task,
+                "ldr_comparison": self.ldr_task}.get(row["step_key"], self.report_task)
         running = "surveying" if row["step_key"] == "survey" else "running"
 
         def reserve(job):
@@ -596,18 +622,63 @@ class Pipelines:
     def attempt_dir(self, step_id):
         return child(self.folder, id_value(step_id))
 
+    def heartbeat(self, step_id, progress=None):
+        """A tick callback for a running child: liveness every HEARTBEAT seconds, plus copied LDR progress.
+
+        Both are written with detail() and never bump the run revision, so Pause and Cancel keep working.
+        """
+        state = {"beat": 0.0, "seq": None}
+
+        def tick():
+            stamp = monotonic()
+            values = {}
+            if stamp - state["beat"] >= HEARTBEAT:
+                state["beat"] = stamp
+                values["heartbeat"] = utc().isoformat()
+            if progress is not None:
+                try:
+                    data = json.loads(progress.read_bytes())
+                except (OSError, ValueError):
+                    data = None
+                if isinstance(data, dict) and data.get("seq") != state["seq"]:
+                    state["seq"] = data.get("seq")
+                    percent = data.get("percent")
+                    values["progress"] = {
+                        "percent": percent if isinstance(percent, int) and not isinstance(percent, bool) and 0 <= percent <= 100 else None,
+                        "message": data["message"][:200] if isinstance(data.get("message"), str) else None,
+                        "phase": data["phase"][:40] if isinstance(data.get("phase"), str) else None,
+                        "seq": data.get("seq") if isinstance(data.get("seq"), int) else None,
+                        "received_at": utc().isoformat()}
+            if values:
+                with self.projects.connect(write=True) as db:
+                    if self.step(db, step_id)["state"] in ("running", "surveying"):
+                        self.detail(db, step_id, **values)
+        return tick
+
+    def record_step_usage(self, step_id, path, key, *, expected=True, interrupted=False):
+        with self.projects.connect() as db:
+            entry = self.step(db, step_id)["entry_id"]
+        self.projects.record_usage(entry, usage.summarize(path, route_key=key, openrouter_expected=expected,
+                                                          interrupted=interrupted))
+
+    def gptr_key(self, mode):
+        return usage.route_key("gptr", mode, (self.book.route("gptr") or {}).get("lock_sha256"))
+
     def survey_task(self, job, step_id):
         with self.projects.connect() as db:
             step = self.step(db, step_id)
             run = self.run_row(db, step["run_id"])
         with self.config_lock:
-            _, display, (install, stored, key) = self.gptr_route("survey", run["selected_profile"], run["original_question"])
+            _, display, (install, stored, key), _ = self.gptr_route("survey", run["selected_profile"], run["original_question"])
             folder = self.attempt_dir(step_id)
             env = gptr_pipeline.guided_projection(stored, key, "survey", run["selected_profile"], folder, self.tokenizer_cache())
         gptr_pipeline.validate_env(env)
-        argv = gptr_pipeline.command(install, "research_report", run["original_question"])
-        result = gptr_pipeline.run(folder, argv, env, deadline=gptr_pipeline.DEADLINES["survey"], job=job, step=step_id,
-                                   attempt=step["attempt"], operation=job.id)
+        argv = gptr_pipeline.command(install, "research_report", run["original_question"], folder)
+        try:
+            result = gptr_pipeline.run(folder, argv, env, deadline=gptr_pipeline.DEADLINES["survey"], job=job, step=step_id,
+                                       attempt=step["attempt"], operation=job.id, tick=self.heartbeat(step_id))
+        finally:
+            self.record_step_usage(step_id, child(folder, "usage.jsonl"), self.gptr_key("research_report"))
         job.checkpoint(final=True)
         return self.collect_report(step_id, result, role="survey", key="report", survey=True)
 
@@ -619,15 +690,131 @@ class Pipelines:
         prompt = brief["public_prompts"][step["step_key"]]
         mode, operation = REPORT_MODES[step["step_key"]]
         with self.config_lock:
-            _, _, (install, stored, key) = self.gptr_route(operation, run["selected_profile"], prompt, mode)
+            _, _, (install, stored, key), _ = self.gptr_route(operation, run["selected_profile"], prompt, mode)
             folder = self.attempt_dir(step_id)
             env = gptr_pipeline.guided_projection(stored, key, operation, run["selected_profile"], folder, self.tokenizer_cache())
         gptr_pipeline.validate_env(env)
-        argv = gptr_pipeline.command(install, mode, prompt)
-        result = gptr_pipeline.run(folder, argv, env, deadline=gptr_pipeline.DEADLINES[mode], job=job, step=step_id,
-                                   attempt=step["attempt"], operation=job.id)
+        argv = gptr_pipeline.command(install, mode, prompt, folder)
+        try:
+            result = gptr_pipeline.run(folder, argv, env, deadline=gptr_pipeline.DEADLINES[mode], job=job, step=step_id,
+                                       attempt=step["attempt"], operation=job.id, tick=self.heartbeat(step_id))
+        finally:
+            self.record_step_usage(step_id, child(folder, "usage.jsonl"), self.gptr_key(mode))
         job.checkpoint(final=True)
         return self.collect_report(step_id, result, role="research_report", key="report")
+
+    def ldr_key(self):
+        return usage.route_key("ldr", "quick_summary", (self.book.route("ldr") or {}).get("lock_sha256"))
+
+    def ldr_task(self, job, step_id):
+        """Run LDR's documented Python API headlessly for one approved public prompt."""
+        with self.projects.connect() as db:
+            step = self.step(db, step_id)
+            run = self.run_row(db, step["run_id"])
+        prompt = json.loads(run["brief_json"])["public_prompts"][step["step_key"]]
+        with self.config_lock:
+            _, _, (install, env), components = self.ldr_route(prompt)
+        folder = private_directory(self.attempt_dir(step_id))
+        argv = ldr_pipeline.command(install, folder)
+        expected = components["settings"]["provider"] == "openrouter"
+        process = None
+        try:
+            process = gptr_pipeline.run_group(folder, argv, ldr_pipeline.projection(env, folder), deadline=ldr_pipeline.DEADLINE,
+                                              job=job, stdin=canonical({"prompt": prompt}), step=step_id,
+                                              attempt=step["attempt"], operation=job.id,
+                                              tick=self.heartbeat(step_id, child(folder, "progress.json")))
+        finally:
+            self.record_step_usage(step_id, child(folder, "usage.jsonl"), self.ldr_key(), expected=expected)
+        result = ldr_pipeline.collect(folder, process)
+        if result["status"] == "cancelled":
+            raise Problem("cancelled", "Operation cancelled.", 409)
+        job.checkpoint(final=True)
+        return self.collect_ldr(step_id, result)
+
+    def collect_ldr(self, step_id, result):
+        """Publish the LDR outputs that verified, then apply the completion rule (spec v2 §2.5)."""
+        with self.projects.connect() as db:
+            step = self.step(db, step_id)
+            run = self.run_row(db, step["run_id"])
+        key = step["step_key"]
+        outputs = result["outputs"]
+        code, message = result.get("code"), result.get("message")
+        parsed = None
+        if result["status"] == "succeeded":
+            if not isinstance(result.get("sources_count"), int) or result["sources_count"] <= 0:
+                code, message = "no_sources", "LDR retrieved no sources. Its report is kept."
+            elif key == "ldr_discovery":
+                try:
+                    parsed = structured_citations(outputs["citations"]["path"], overflow="truncate") if "citations" in outputs else None
+                except Problem:
+                    parsed = None
+                if not parsed or not any(usable_citation(row) for row in parsed.rows):
+                    code, message = "no_usable_citations", "LDR finished but returned no usable citations. Its report is kept."
+        if key == "ldr_comparison" and "citations" in outputs:
+            try:
+                structured_citations(outputs["citations"]["path"], overflow="truncate")
+            except Problem:
+                outputs = {name: value for name, value in outputs.items() if name != "citations"}
+        names = {"report": ("LDR report.md", "report", "discovery_report", "LDR report"),
+                 "citations": ("LDR citations.ris", "citations", "citation_export", "LDR citations")}
+        staged = []
+        try:
+            for output_key, item in outputs.items():
+                filename, kind, role, title = names[output_key]
+                entry = self.projects.stage(run["project_id"], run["chat_id"], item["path"], filename, kind)
+                if entry["sha256"] != item["sha256"]:
+                    entry["temp"].unlink(missing_ok=True)
+                    raise Problem("changed_output", "The LDR output changed while it was collected.", 503)
+                staged.append({"key": output_key, "role": role, "stage": entry, "app": "ldr", "version": installer.PINS["ldr"],
+                               "title": title, "origin": "public_native"})
+        except BaseException:
+            for item in staged:
+                item["stage"]["temp"].unlink(missing_ok=True)
+            raise
+        succeeded = result["status"] == "succeeded" and code is None
+        if not succeeded and code is None:
+            code, message = "native_output", "LDR finished without a verifiable result."
+
+        def check(db):
+            if self.step(db, step_id)["state"] not in ("running", "interrupted"):
+                raise Problem("stale_attempt", "This attempt was superseded.", 409)
+
+        def finalize(db, ids):
+            detail = {"research_id": result.get("research_id"), "sources_count": result.get("sources_count")}
+            if parsed is not None:
+                detail["citations"] = {"records": parsed.total, "usable": sum(1 for row in parsed.rows if usable_citation(row)),
+                                       "truncated": parsed.truncated}
+            self.detail(db, step_id, headless=detail, sources_count=result.get("sources_count"))
+            if not succeeded:
+                self.fail_step(db, step_id, code, message)
+                return
+            self.set_step(db, step_id, "succeeded", native_result_id=result.get("research_id") or None)
+
+        ids = self.projects.publish(run["project_id"], run["chat_id"], staged, step=step_id, run_id=step_id,
+                                    entry=step["entry_id"], check=check, finalize=finalize,
+                                    marker=child(private_directory(self.attempt_dir(step_id)), "publish.json")) if staged else []
+        if not staged:
+            with self.projects.connect(write=True) as db:
+                check(db)
+                finalize(db, [])
+        if succeeded:
+            self.verify_and_advance(step_id, outputs, ids)
+        self.notify()
+        if not succeeded:
+            raise Problem(code, message, 422)
+        return {"artifact_ids": ids, "sources_count": result.get("sources_count")}
+
+    def verify_and_advance(self, step_id, outputs, ids):
+        """Advance only once both published artifacts verifiably belong to this attempt's outputs."""
+        with self.projects.connect(write=True) as db:
+            step = self.step(db, step_id)
+            rows = {row["output_key"]: dict(row) for row in db.execute("SELECT * FROM artifact WHERE step_id=?", (step_id,))}
+            if step["state"] != "succeeded" or any(rows.get(key, {}).get("sha256") != item["sha256"] for key, item in outputs.items()):
+                self.fail_step(db, step_id, "native_output", "The published LDR outputs could not be verified. Rerun this stage.")
+                return
+            run = self.run_row(db, step["run_id"])
+            if run["state"] not in TERMINAL_RUN:
+                self.advance(db, run["id"], step["position"])
 
     def collect_report(self, step_id, result, *, role, key, survey=False):
         with self.projects.connect() as db:
@@ -710,6 +897,8 @@ class Pipelines:
         except Problem as problem:
             error = {"code": problem.code, "message": str(problem)}
             questionnaire = scope_gate.fallback(round_number) if round_number == 1 else {"round": 2, "source": "fallback", "questions": []}
+        self.projects.record_usage(step["entry_id"], usage.scope_gate(observed, sent=bool(key),
+                                                                      error=error if observed is None else None))
         record = questionnaire | {"observed": observed, "error": error, "created_at": now()}
         staged = self.projects.stage(run["project_id"], run["chat_id"], io.BytesIO(canonical(record)),
                                      f"scope_round_{round_number}.json", "questionnaire")
@@ -754,6 +943,9 @@ class Pipelines:
                                                                                    "pqa": "PaperQA2"}.get(row["app_id"], "RAH")})
         current = steps[-1] if steps else None
         brief = json.loads(run["brief_json"]) if run["brief_json"] else None
+        entries = {row["id"]: row["usage_json"] for row in db.execute(
+            "SELECT id, usage_json FROM chat_entry WHERE id IN (SELECT entry_id FROM pipeline_step WHERE run_id=?)", (run["id"],))}
+        stamp = utc()
         data = {key: run[key] for key in ("id", "chat_id", "brief_revision", "purpose", "recipe_version", "state", "outcome",
                                           "original_question", "selected_profile", "created_at", "updated_at", "revision")}
         data |= {"scope_id": run["project_id"], "purpose_label": PURPOSES[run["purpose"]], "display": DISPLAY.get(run["state"], run["state"]),
@@ -763,7 +955,9 @@ class Pipelines:
                                                        "operation_id", "started_at", "finished_at")}
                            | {"display": DISPLAY[step["state"]], "detail": self.public_detail(json.loads(step["detail_json"])),
                               "outputs": outputs.get(step["id"], []),
-                              "app": STEPS[step["step_key"]][0], "current": step is current} for step in steps]}
+                              "app": STEPS[step["step_key"]][0], "current": step is current}
+                           | self.status_fields(step, entries.get(step["entry_id"]), stamp) for step in steps],
+                 "server_time": stamp.isoformat()}
         data["actions"] = self.available(db, run, current, brief)
         if current and current["step_key"] == "scope_gate" and current["state"] == "awaiting_scope":
             data["questionnaires"] = self.questionnaires(db, run["id"])
@@ -771,6 +965,25 @@ class Pipelines:
         if current and any(key in recipe for key in ("papers", "paper_selection")) and current["position"] >= 2:
             data["papers"] = self.papers(db, run)
         return data
+
+    @staticmethod
+    def status_fields(step, usage_json, stamp):
+        """Polled status: elapsed time, deadline, liveness heartbeat, LDR progress and recorded usage."""
+        detail = json.loads(step["detail_json"])
+        since = step["started_at"] if step["state"] in ("running", "surveying") else (
+            step["queued_at"] if step["state"] in ("queued", "waiting_app") else None)
+        elapsed = None
+        if since:
+            try:
+                start = datetime.fromisoformat(since)
+                start = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+                elapsed = max(0, int((stamp - start).total_seconds()))
+            except ValueError:
+                elapsed = None
+        return {"elapsed_seconds": elapsed, "deadline_seconds": DEADLINES.get(step["step_key"]),
+                "progress": detail.get("progress"), "heartbeat": detail.get("heartbeat"), "server_time": stamp.isoformat(),
+                "usage": json.loads(usage_json) if usage_json else None,
+                "mode": "headless" if step["step_key"] in LDR_STEPS else None}
 
     @staticmethod
     def public_brief(brief):
@@ -784,7 +997,7 @@ class Pipelines:
 
     @staticmethod
     def public_detail(detail):
-        hidden = {key: value for key, value in detail.items() if key not in ("prior", "recovery")}
+        hidden = {key: value for key, value in detail.items() if key not in ("prior", "recovery", "progress", "heartbeat")}
         if isinstance(hidden.get("corpus"), dict):
             hidden["corpus"] = {"pdf_ids": hidden["corpus"]["pdf_ids"], "route_id": hidden["corpus"]["route_id"]}
         return hidden
@@ -804,10 +1017,8 @@ class Pipelines:
                 actions.append("ask_more")
             if run["purpose"] == "rapid_research":
                 actions.append("use_survey_result")
-        if key in ("ldr_discovery", "ldr_comparison") and state in ("waiting_native", "paused"):
-            actions += ["launch_native", "confirm_native_result"]
         if key in ("papers", "paper_selection") and state == "awaiting_papers":
-            actions += ["set_papers", "start_acquisition", "approve_private_lookup", "select_corpus"]
+            actions += ["set_papers", "start_acquisition", "approve_private_lookups", "select_corpus"]
         if state == "reconfirm_recipients":
             actions.append("reconfirm_route")
         if state in ("failed", "interrupted", "cancelled"):
@@ -839,17 +1050,8 @@ class Pipelines:
         try:
             if current["state"] == "reconfirm_recipients":
                 result["reconfirm"] = self.reconfirm_preview(run, current)
-            if current["step_key"] in ("ldr_discovery", "ldr_comparison") and current["state"] in ("waiting_native", "paused"):
-                brief = json.loads(run["brief_json"])
-                fingerprint, display = self.ldr_route(brief["public_prompts"][current["step_key"]])
-                result["native_route"] = display | {"digest": self.remember({"kind": "native_route", "step": current["id"],
-                                                                             "fingerprint": fingerprint}),
-                                                    "prompt": brief["public_prompts"][current["step_key"]]}
             if current["step_key"] == "papers" and current["state"] == "awaiting_papers":
-                with self.projects.connect() as db:
-                    rows = [dict(row) for row in db.execute("""SELECT * FROM pipeline_paper WHERE run_id=? AND origin_class<>'public_native'
-                                                              AND access_status<>'oa_acquired' AND state='needed'""", (run["id"],))]
-                result["lookup_previews"] = {row["id"]: preview for row in rows if (preview := self.private_lookup_preview(run, row))}
+                result["lookup_batch"] = self.lookup_batch(run, current)
             if current["state"] == "interrupted":
                 recovery = json.loads(current["detail_json"]).get("recovery")
                 if recovery:
@@ -862,15 +1064,15 @@ class Pipelines:
     def reconfirm_preview(self, run, current):
         key = current["step_key"]
         if key == "survey":
-            fingerprint, display, _ = self.gptr_route("survey", run["selected_profile"], run["original_question"])
+            fingerprint, display, _, components = self.gptr_route("survey", run["selected_profile"], run["original_question"])
         elif key == "scope_gate":
-            fingerprint, display = self.gate_route(run["original_question"])
+            fingerprint, display, components = self.gate_route(run["original_question"])
         else:
             brief = json.loads(run["brief_json"])
-            mode, operation = REPORT_MODES[key]
-            fingerprint, display, _ = self.gptr_route(operation, run["selected_profile"], brief["public_prompts"][key], mode)
+            fingerprint, display, components = self.step_route(run, key, brief["public_prompts"][key])
         return {"step": current["id"], "reason": current["error_detail"], "route": display,
-                "digest": self.remember({"kind": "reconfirm", "step": current["id"], "fingerprint": fingerprint})}
+                "digest": self.remember({"kind": "reconfirm", "step": current["id"], "fingerprint": fingerprint,
+                                         "components": components})}
 
     # ---- actions ----------------------------------------------------------------------------------
 
@@ -931,7 +1133,7 @@ class Pipelines:
         with self.projects.connect(write=True) as db:
             _, step = self.guard(db, run, current)
             key = step["step_key"]
-            if step["state"] == "paused" and key in ("survey", "scope_gate", *REPORT_MODES):
+            if step["state"] == "paused" and key in MANAGED_STEPS:
                 self.set_step(db, step["id"], "queued", queued_at=now())
                 self.bump(db, run["id"], "queued")
             elif step["state"] == "paused" and key == "paper_analysis":
@@ -940,9 +1142,6 @@ class Pipelines:
                     raise Problem("profile_unavailable", available.get("reason") or "Managed PDF analysis is unavailable.", 409)
                 self.set_step(db, step["id"], "awaiting_disclosure")
                 self.bump(db, run["id"], "awaiting_disclosure")
-            elif step["state"] == "paused" and key in ("ldr_discovery", "ldr_comparison"):
-                self.set_step(db, step["id"], "waiting_native")
-                self.bump(db, run["id"], "waiting_native")
             elif step["state"] in TERMINAL_STEP:
                 self.bump(db, run["id"], "running")
                 result = self.finish_action(db, scope, chat, run, "resume", action_id, body)
@@ -971,8 +1170,6 @@ class Pipelines:
                 self.set_step(db, step["id"], "cancelled", error_detail="Cancelled by you.")
             self.bump(db, run["id"], "cancelled")
             result = self.finish_action(db, scope, chat, run, "cancel", action_id, body, {"finishing": finishing})
-        if self.native:
-            self.native.revoke(run["id"])
         self.discard_review(scope, step)
         return result, 200
 
@@ -1013,23 +1210,26 @@ class Pipelines:
             rounds = self.questionnaires(db, run["id"])
         resolved, prompt = self.resolve_scope(run, body, rounds)
         routes = {}
+        problem = None
         with self.config_lock:
             for key in RECIPES[run["purpose"]][2:]:
-                if key in REPORT_MODES:
-                    mode, operation = REPORT_MODES[key]
-                    fingerprint, display, _ = self.gptr_route(operation, run["selected_profile"], prompt, mode)
-                    routes[key] = {"fingerprint": fingerprint, "display": display}
-                elif key in ("ldr_discovery", "ldr_comparison"):
-                    fingerprint, display = self.ldr_route(prompt)
-                    routes[key] = {"fingerprint": fingerprint, "display": display}
+                if key in REPORT_MODES or key in LDR_STEPS:
+                    try:
+                        fingerprint, display, components = self.step_route(run, key, prompt)
+                    except Problem as error:
+                        if error.code != "ldr_headless_unavailable":
+                            raise
+                        problem = {"code": error.code, "message": str(error)}
+                        continue
+                    routes[key] = {"fingerprint": fingerprint, "display": display, "components": components}
         constraints = [{"question": label, "answer": answer} for label, answer in resolved["lines"]]
         if resolved["instructions"]:
             constraints.append({"question": "Additional instructions", "answer": resolved["instructions"]})
         payload = {"kind": "scope", "run": run["id"], "step": current["id"], "prompt": prompt, "resolved": [list(line) for line in resolved["lines"]],
                    "instructions": resolved["instructions"], "broad": resolved["broad"], "answers": body.get("answers") or {},
                    "routes": routes, "rounds": rounds}
-        token = self.remember(payload)
-        return {"digest": token, "prompt": prompt, "constraints": constraints, "scope_mode": "broad" if resolved["broad"] else "scoped",
+        token = None if problem else self.remember(payload)
+        return {"digest": token, "route_problem": problem, "prompt": prompt, "constraints": constraints, "scope_mode": "broad" if resolved["broad"] else "scoped",
                 "needs_conflict_review": not resolved["broad"] and bool(constraints), "length": len(prompt),
                 "limit": scope_gate.PROMPT_LIMIT, "routes": {key: value["display"] for key, value in routes.items()},
                 "private_stage": "PaperQA2 gets a fresh disclosure review later. Its PDFs, question and excerpt never enter this brief."
@@ -1039,12 +1239,9 @@ class Pipelines:
         preview = self.recall(body.get("digest"), "scope")
         if preview["step"] != current["id"]:
             raise Problem("stale_preview", "The questions changed. Preview the scope again.", 409)
-        if not preview["broad"] and (preview["resolved"] or preview["instructions"]) and body.get("constraints_reviewed") is not True:
-            raise Problem("conflict_review", "Confirm “I reviewed these constraints for conflicts” before approving.", 422)
         with self.config_lock:
             for key, route in preview["routes"].items():
-                current_fp = (self.ldr_route(preview["prompt"])[0] if key.startswith("ldr")
-                              else self.gptr_route(REPORT_MODES[key][1], run["selected_profile"], preview["prompt"], REPORT_MODES[key][0])[0])
+                current_fp = self.step_route(run, key, preview["prompt"])[0]
                 if current_fp != route["fingerprint"]:
                     raise Problem("stale_preview", "The recipients changed. Preview the scope again.", 409)
         with self.projects.connect(write=True) as db:
@@ -1070,7 +1267,7 @@ class Pipelines:
                 raise Problem("brief_exists", "This revision already has an approved brief.", 409)
             self.approve(db, run["id"], "scope", brief, step=step["id"],
                          fingerprint=json.dumps({key: value["fingerprint"] for key, value in preview["routes"].items()}),
-                         display={"prompt_digest": digest(preview["prompt"].encode())}, ttl=CONSENT_TTL)
+                         display={"prompt_digest": digest(preview["prompt"].encode())})
             self.set_step(db, step["id"], "succeeded")
             self.bump(db, run["id"], "brief_approved")
             self.advance(db, run["id"], 1)
@@ -1121,7 +1318,7 @@ class Pipelines:
         with self.projects.connect(write=True) as db:
             self.guard(db, run, current)
             self.approve(db, run["id"], "reconfirm", {"step": current["id"], "fingerprint": preview["fingerprint"]},
-                         step=current["id"], fingerprint=preview["fingerprint"], ttl=CONSENT_TTL)
+                         step=current["id"], fingerprint=preview["fingerprint"], display={"components": preview.get("components")})
             self.set_step(db, current["id"], "queued", queued_at=now(), route_fingerprint=preview["fingerprint"])
             self.bump(db, run["id"], "queued")
             result = self.finish_action(db, scope, chat, run, "reconfirm_route", action_id, body)
@@ -1135,21 +1332,17 @@ class Pipelines:
         with self.projects.connect(write=True) as db:
             latest, step = self.guard(db, run, current)
             key = step["step_key"]
-            if key in ("ldr_discovery", "ldr_comparison"):
-                state = "waiting_native"
-            elif key in ("survey", "scope_gate", *REPORT_MODES):
-                state = "reconfirm_recipients"
-            else:
+            if key not in MANAGED_STEPS:
                 raise Problem("action_state", "This stage cannot be rerun.", 409)
             entry = db.execute("SELECT question, quote FROM chat_entry WHERE id=?", (step["entry_id"],)).fetchone()
-            new = self.new_attempt(db, latest, step["position"], state, question=entry["question"], round_number=step["round"])
+            # consent() still stops the new attempt at dispatch if any material route dimension changed.
+            new = self.new_attempt(db, latest, step["position"], "queued", question=entry["question"], round_number=step["round"])
             if step["round"] == 2:
                 self.detail(db, new, prior=json.loads(step["detail_json"]).get("prior"))
             self.approve(db, run["id"], "rerun", {"step": step["id"], "charges": True}, step=new)
-            if state == "reconfirm_recipients":
-                self.set_step(db, new, state, error_detail="Review the recipients before this new attempt.")
-            self.bump(db, run["id"], state)
+            self.bump(db, run["id"], "queued")
             result = self.finish_action(db, scope, chat, run, "rerun", action_id, body, {"new_step": new})
+        self.notify()
         return result, 200
 
     def do_reuse_output(self, scope, chat, run, current, body, action_id):
@@ -1157,6 +1350,22 @@ class Pipelines:
         if preview["step"] != current["id"]:
             raise Problem("stale_preview", "Review the recovered output again.", 409)
         recovery = preview["data"]
+        if current["step_key"] in LDR_STEPS:
+            folder = self.attempt_dir(current["id"])
+            result = ldr_pipeline.collect(folder, gptr_pipeline.ProcessResult("exited", 0, 0.0, []))
+            if result["status"] != "succeeded":
+                raise Problem("recovery_changed", "The recovered output no longer matches this attempt. Rerun the stage instead.", 409)
+            with self.projects.connect(write=True) as db:
+                self.guard(db, run, current)
+                self.set_step(db, current["id"], "running")
+                self.finish_action(db, scope, chat, run, "reuse_output", action_id, body)
+            try:
+                self.collect_ldr(current["id"], result)
+            except Problem as error:
+                if error.code not in ("no_sources", "no_usable_citations", "native_output"):
+                    raise
+            self.forget(body.get("digest"))
+            return self.get(scope, chat, run["id"]), 200
         path = child(self.attempt_dir(current["id"]), "outputs", recovery["outputs"][0]["name"])
         if not path.is_file() or file_digest(path) != recovery["outputs"][0]["sha256"]:
             raise Problem("recovery_changed", "The recovered output no longer matches this attempt. Rerun the stage instead.", 409)
@@ -1180,155 +1389,6 @@ class Pipelines:
         self.forget(body.get("digest"))
         return self.get(scope, chat, run["id"]), 200
 
-    # ---- native LDR -------------------------------------------------------------------------------
-
-    def do_launch_native(self, scope, chat, run, current, body, action_id):
-        if not self.native:
-            raise Problem("native_unavailable", "Native handoff is unavailable in this process.", 503)
-        preview = self.recall(body.get("route_digest"), "native_route")
-        if preview["step"] != current["id"] or body.get("attest") is not True:
-            raise Problem("native_affirmation", "Review the displayed LDR route and confirm you will check its settings in LDR.", 422)
-        brief = json.loads(run["brief_json"])
-        prompt = brief["public_prompts"][current["step_key"]]
-        with self.config_lock:
-            payload, display = self._ldr_route(prompt)
-        fingerprint = digest(canonical(payload))
-        generation = payload["process"]
-        # The browser starts LDR before submitting the review. Only a stopped preview
-        # with otherwise identical inputs can transition to a fresh process this way.
-        cold_start = (generation is not None and not display["relaunch_needed"]
-                      and digest(canonical(payload | {"process": None})) == preview["fingerprint"])
-        if fingerprint != preview["fingerprint"] and not cold_start:
-            raise Problem("stale_preview", "The LDR route changed. Review it again.", 409)
-        self.native.check_single(current["id"])
-        reopen = body.get("reopen") is True
-        formats = ["ris", "md"] if current["step_key"] == "ldr_discovery" else ["md", "ris"]
-        with self.projects.connect(write=True) as db:
-            self.guard(db, run, current)
-            self.approve(db, run["id"], "native_launch", {"step": current["id"], "fingerprint": fingerprint, "reopen": reopen},
-                         step=current["id"], fingerprint=fingerprint, display={"attested": True})
-            self.finish_action(db, scope, chat, run, "launch_native", action_id, body)
-        opened = self.native.open_ldr({"scope": scope, "chat": chat, "entry": current["entry_id"], "step": current["id"],
-                                       "run": run["id"], "attempt": current["attempt"], "fingerprint": fingerprint,
-                                       "generation": generation, "formats": formats, "prompt": "" if reopen else prompt})
-        with self.projects.connect(write=True) as db:
-            self.set_step(db, current["id"], "waiting_native", route_fingerprint=fingerprint,
-                          entry_label="Opened" if opened.get("opened") else "Waiting for native step")
-            self.detail(db, current["id"], prefill_prepared=opened.get("prefill_prepared"), opened_at=now())
-            self.bump(db, run["id"], "waiting_native")
-            data = self.run_data(db, self.run_row(db, run["id"]))
-        return data | {"native": opened}, 200
-
-    def native_export(self, record, fmt, raw, result_id):
-        """Register one authenticated native export for the bound step attempt as a pending output."""
-        key = {"md": "report", "ris": "citations"}[fmt]
-        if not isinstance(result_id, str) or not re.fullmatch(r"[0-9a-fA-F-]{36}", result_id):
-            raise Problem("export_handoff", "The native result ID was not provided.", 403)
-        result_id = str(UUID(result_id))
-        with self.projects.connect() as db:
-            step = self.step(db, record["step"])
-            run = self.run_row(db, step["run_id"])
-            latest = self.latest_attempt(db, run["id"], step["position"])
-            chat = db.execute("SELECT trash_state FROM chat WHERE id=?", (run["chat_id"],)).fetchone()
-        pending = step["state"] in ("waiting_native", "paused") and run["state"] not in TERMINAL_RUN
-        sibling = step["state"] == "succeeded" and step["native_result_id"] == result_id and run["state"] not in ("cancelled", "failed")
-        if (latest["id"] != step["id"] or chat["trash_state"] or not (pending or sibling)
-                or (step["native_result_id"] and step["native_result_id"] != result_id)):
-            raise Problem("export_handoff", "This export does not belong to the waiting LDR stage.", 409)
-        filename = "LDR export." + fmt
-        kind = "citations" if fmt == "ris" else "report"
-        staged = self.projects.stage(run["project_id"], run["chat_id"], io.BytesIO(raw), filename, kind)
-        if fmt == "ris":
-            try:
-                structured_citations(staged["temp"])
-            except Problem:
-                staged["temp"].unlink(missing_ok=True)
-                raise
-        origin = "public_native" if step["state"] == "succeeded" else "private_or_unknown"
-
-        def check(db):
-            latest = self.step(db, step["id"])
-            if latest["native_result_id"] and latest["native_result_id"] != result_id:
-                raise Problem("export_handoff", "This stage is bound to a different native result.", 409)
-
-        def finalize(db, ids):
-            db.execute("UPDATE pipeline_step SET native_result_id=COALESCE(native_result_id, ?), updated_at=? WHERE id=?",
-                       (result_id, now(), step["id"]))
-            received = self.detail(db, step["id"]).get("received", [])
-            self.detail(db, step["id"], received=sorted(set(received) | {fmt}), native_verified=True)
-            self.bump(db, run["id"])
-
-        version = installer.PINS["ldr"]
-        ids = self.projects.publish(run["project_id"], run["chat_id"], [{
-            "key": key, "role": "discovery_report" if key == "report" else "citation_export", "stage": staged,
-            "app": "ldr", "version": version, "origin": origin, "title": "LDR native export"}],
-            step=step["id"], run_id=step["id"], entry=step["entry_id"], check=check, finalize=finalize)
-        return ids[0]
-
-    def manual_native(self, scope, chat, step_id, filename, stream):
-        """A user-selected LDR export file. It stays labelled as user-imported with an unverified result ID."""
-        suffix = Path(filename or "").suffix.lower()
-        if suffix not in (".md", ".ris"):
-            raise Problem("file_type", "Select an LDR Markdown (.md) or RIS (.ris) export.", 422)
-        with self.projects.connect() as db:
-            step = self.step(db, id_value(step_id))
-            run = self.require_run(db, scope, chat, step["run_id"])
-            if self.current_step(db, run["id"])["id"] != step["id"] or step["step_key"] not in ("ldr_discovery", "ldr_comparison") \
-                    or step["state"] not in ("waiting_native", "paused"):
-                raise Problem("attachment_state", "This stage is not waiting for an LDR export.", 409)
-        kind = "citations" if suffix == ".ris" else "report"
-        staged = self.projects.stage(scope, chat, stream, "User-imported LDR export" + suffix, kind)
-        if kind == "citations":
-            try:
-                structured_citations(staged["temp"])
-            except Problem:
-                staged["temp"].unlink(missing_ok=True)
-                raise
-
-        def finalize(db, ids):
-            received = self.detail(db, step["id"]).get("manual", [])
-            self.detail(db, step["id"], manual=sorted(set(received) | {suffix[1:]}))
-            self.bump(db, run["id"])
-
-        return self.projects.publish(scope, chat, [{"key": "citations" if kind == "citations" else "report",
-                                                     "role": "native_result", "stage": staged, "app": "ldr", "version": installer.PINS["ldr"],
-                                                     "title": "User-imported LDR export", "origin": "private_or_unknown"}],
-                                     step=step["id"], run_id=step["id"], entry=step["entry_id"], finalize=finalize)[0]
-
-    def do_confirm_native_result(self, scope, chat, run, current, body, action_id):
-        if body.get("attribution") is not True:
-            raise Problem("native_confirmation", "Confirm this is the LDR result for the approved public question.", 422)
-        ids = body.get("artifact_ids")
-        with self.projects.connect() as db:
-            rows = {row["id"]: dict(row) for row in db.execute("SELECT * FROM artifact WHERE step_id=?", (current["id"],))}
-        if not isinstance(ids, list) or not ids or len(set(ids)) != len(ids) or set(ids) - set(rows):
-            raise Problem("native_confirmation", "Select the exports received for this stage.", 422)
-        chosen = [rows[value] for value in ids]
-        keys = {row["output_key"] for row in chosen}
-        required = "citations" if current["step_key"] == "ldr_discovery" else "report"
-        if required not in keys:
-            label = "a valid LDR RIS export" if required == "citations" else "the original LDR Markdown report"
-            raise Problem("native_required", f"This stage needs {label} before it can continue.", 409)
-        manual = [row for row in chosen if row["role"] == "native_result"]
-        if len(manual) == 2 and body.get("same_result") is not True:
-            raise Problem("native_confirmation", "Confirm that both user-imported files belong to the same LDR result.", 422)
-        public = body.get("public_provenance") is True
-        with self.projects.connect(write=True) as db:
-            latest, step = self.guard(db, run, current)
-            for row in chosen:
-                db.execute("UPDATE artifact SET origin_class=? WHERE project_id=? AND id=?",
-                           ("public_native" if public else "private_or_unknown", row["project_id"], row["id"]))
-            self.approve(db, run["id"], "native_confirmation", {"ids": ids, "public": public, "result": step["native_result_id"]},
-                         step=step["id"], display={"verified": bool(step["native_result_id"]) and not manual})
-            self.set_step(db, step["id"], "succeeded")
-            self.detail(db, step["id"], confirmed=ids, verified=bool(step["native_result_id"]) and not manual)
-            self.advance(db, run["id"], step["position"])
-            result = self.finish_action(db, scope, chat, run, "confirm_native_result", action_id, body)
-        if self.native:
-            self.native.keep_for_sibling(current["id"])
-        self.notify()
-        return result, 200
-
     # ---- Papers Needed ------------------------------------------------------------------------------
 
     def suggestions(self, db, run):
@@ -1338,7 +1398,7 @@ class Pipelines:
                                 AND s.state='succeeded' AND a.output_key='citations' ORDER BY s.attempt DESC LIMIT 1""", (run["id"],)).fetchone()
             if not row:
                 return None, []
-            rows = structured_citations(self.projects.artifact_path(dict(row)))
+            rows = structured_citations(self.projects.artifact_path(dict(row)), overflow="truncate").rows
             return dict(row), [item | oa.from_url(item.get("citation_url")) for item in rows]
         if run["purpose"] == "deep_research":
             row = db.execute("""SELECT a.* FROM artifact a JOIN pipeline_step s ON s.id=a.step_id WHERE s.run_id=? AND s.position=2
@@ -1498,49 +1558,140 @@ class Pipelines:
         self.queue_acquisition(scope, chat, run["id"], current["id"], ids, private=False)
         return result | {"acquisition": "queued"}, 202
 
-    def private_lookup_preview(self, run, row):
-        guided = settings.guided(self.config())
-        found, problem = oa.identifiers(row)
-        if problem or not found:
-            return None
-        if found.get("pmcid"):
-            stage, sends, destinations = "cloud", [found["pmcid"][0]], [oa.BUCKET]
-        elif found.get("doi"):
-            if not guided["contact"]:
-                return {"stage": "converter", "blocked": "Contact needed for DOI lookup"}
-            stage, sends, destinations = "converter", [found["doi"], "tool=" + oa.TOOL, "maintainer contact"], [oa.CONVERTER]
-        else:
-            return None
-        payload = {"kind": "private_lookup", "paper": row["id"], "run": run["id"], "stage": stage, "identifiers": sends}
-        return {"stage": stage, "sends": sends, "destinations": destinations, "digest": self.remember(payload),
-                "notice": "Only these identifiers are sent. Titles, notes, report text and PDFs are never sent."}
+    GRANT_FIELDS = ("origin_class", "doi", "pmcid", "pmid", "citation_url", "confirmed_version")
 
-    def do_approve_private_lookup(self, scope, chat, run, current, body, action_id):
-        preview = self.recall(body.get("digest"), "private_lookup")
-        if preview["paper"] != body.get("paper_id") or preview["stage"] != body.get("stage") or preview["run"] != run["id"]:
-            raise Problem("stale_preview", "Review the lookup again.", 409)
-        approved = body.get("approve") is True
+    def lookup_batch(self, run, current):
+        """One immutable grant per private row: exact identifiers, sequence and endpoints, capped at oa.PASS_PAPERS."""
+        guided = settings.guided(self.config())
+        with self.projects.connect() as db:
+            rows = [dict(row) for row in db.execute("""SELECT * FROM pipeline_paper WHERE run_id=? AND origin_class<>'public_native'
+                                                      AND access_status<>'oa_acquired' AND state='needed' ORDER BY position""",
+                                                   (run["id"],))]
+        grants, listed, blocked, excluded = {}, [], [], []
+        for row in rows:
+            found, problem = oa.identifiers(row)
+            if problem or not found or not (found.get("doi") or found.get("pmcid")):
+                continue
+            if found.get("pmcid"):
+                sequence, endpoints = ["cloud"], [oa.BUCKET]
+                sends = [{"identifier": found["pmcid"][0], "destination": "PMC Cloud Service (" + oa.BUCKET_HOST + ")"}]
+            else:
+                if not guided["contact"]:
+                    blocked.append({"paper_id": row["id"], "identifier": found["doi"],
+                                    "reason": "A maintainer contact is needed for DOI lookups. Add one in Settings → Guided research."})
+                    continue
+                sequence, endpoints = ["converter", "cloud"], [oa.CONVERTER, oa.BUCKET]
+                sends = [{"identifier": found["doi"] + " · tool=" + oa.TOOL + " · maintainer contact",
+                          "destination": "PMC ID Converter (NCBI)"},
+                         {"identifier": "the PMCID returned for this DOI", "destination": "PMC Cloud Service (" + oa.BUCKET_HOST + ")"}]
+            if len(grants) >= oa.PASS_PAPERS:
+                excluded.append({"paper_id": row["id"], "reason": "Not included in this batch"})
+                continue
+            grants[row["id"]] = {"run_id": run["id"], "step_id": current["id"], "project_id": run["project_id"],
+                                 "paper_id": row["id"], **{field: row[field] for field in self.GRANT_FIELDS},
+                                 "lookup": {"doi": found.get("doi"), "pmcid": found["pmcid"][0] if found.get("pmcid") else None},
+                                 "sequence": sequence, "endpoints": endpoints, "contact_required": "converter" in sequence}
+            listed.append({"paper_id": row["id"], "title": row["title"], "sends": sends, "sequence": sequence})
+        if not grants and not blocked:
+            return None
+        token = self.remember({"kind": "lookup_batch", "run": run["id"], "step": current["id"], "grants": grants}) if grants else None
+        return {"rows": listed, "blocked": blocked, "excluded": excluded, "digest": token,
+                "notice": "Only the identifiers listed are sent. Titles, notes, report text and PDFs are never sent."}
+
+    def do_approve_private_lookups(self, scope, chat, run, current, body, action_id):
+        preview = self.recall(body.get("digest"), "lookup_batch")
+        ids = body.get("paper_ids")
+        if (preview["run"] != run["id"] or preview["step"] != current["id"] or not isinstance(ids, list) or not ids
+                or len(set(ids)) != len(ids) or set(ids) - set(preview["grants"])):
+            raise Problem("stale_preview", "The lookup batch changed. Review it again.", 409)
+        if self.jobs.busy("oa"):
+            raise Problem("busy", "Another lookup is running. Try again when it finishes.", 409)
+        grants = {paper: preview["grants"][paper] for paper in ids}
+        approvals = []
         with self.projects.connect(write=True) as db:
             self.guard(db, run, current)
-            self.approve(db, run["id"], "oa_private", {"paper": preview["paper"], "stage": preview["stage"], "ids": preview["identifiers"]},
-                         step=current["id"], decision="approved" if approved else "declined", display={"stage": preview["stage"]})
-            result = self.finish_action(db, scope, chat, run, "approve_private_lookup", action_id, body)
+            for paper, grant in grants.items():
+                approvals.append(self.approve(db, run["id"], "oa_private", digest(canonical(grant)), step=current["id"],
+                                              display={"stage": "both", "grant": grant}))
+            result = self.finish_action(db, scope, chat, run, "approve_private_lookups", action_id, body)
+        try:
+            self.queue_acquisition(scope, chat, run["id"], current["id"], list(grants), private="both", grants=grants)
+        except Problem:
+            with self.projects.connect(write=True) as db:
+                db.executemany("UPDATE pipeline_approval SET decision='declined', display_json=json_set(display_json,'$.reason','not_started') WHERE id=?",
+                               [(approval,) for approval in approvals])
+                db.execute("DELETE FROM pipeline_action WHERE id=?", (id_value(action_id),))
+            raise Problem("busy", "Another lookup is running. Try again when it finishes.", 409)
         self.forget(body.get("digest"))
-        if approved:
-            self.queue_acquisition(scope, chat, run["id"], current["id"], [preview["paper"]], private=preview["stage"])
-            return result | {"acquisition": "queued"}, 202
-        return result, 200
+        return result | {"acquisition": "queued"}, 202
 
-    def queue_acquisition(self, scope, chat, run_id, step_id, paper_ids, *, private):
+    def queue_acquisition(self, scope, chat, run_id, step_id, paper_ids, *, private, grants=None):
         def task(job):
-            return self.acquire(job, scope, chat, run_id, step_id, paper_ids, private)
+            return self.acquire(job, scope, chat, run_id, step_id, paper_ids, private, grants=grants)
 
         try:
             return self.jobs.start("oa", task)
         except Problem:
             raise Problem("busy", "Another acquisition pass is running. Try again when it finishes.", 409)
 
-    def acquire(self, job, scope, chat, run_id, step_id, paper_ids, private, transport=None):
+    def grant_matches(self, paper, grant):
+        with self.projects.connect() as db:
+            row = db.execute("SELECT * FROM pipeline_paper WHERE id=? AND run_id=?", (paper, grant["run_id"])).fetchone()
+        if not row or any(row[field] != grant[field] for field in self.GRANT_FIELDS):
+            return False
+        if [endpoint for endpoint in (oa.CONVERTER, oa.BUCKET) if endpoint in grant["endpoints"]] != grant["endpoints"]:
+            return False
+        guided = settings.guided(self.config())
+        return not grant["contact_required"] or bool(guided["contact"])
+
+    def grant_transport(self, transport, paper, grant):
+        """Re-check the grant before every request and allow only its disclosed endpoints and identifiers."""
+        pipes = self
+        lookup = grant["lookup"]
+        bound = {"pmcid": lookup["pmcid"], "converted": False}
+
+        class Granted:
+            violation = None
+
+            def get(self, url, **kwargs):
+                if not pipes.grant_matches(paper, grant):
+                    self.violation = "changed_after_approval"
+                    raise Problem("changed_after_approval", "This paper changed after approval. Review the lookup again.", 409)
+                converter = False
+                if url.startswith(oa.CONVERTER):
+                    query = parse_qs(urlsplit(url).query)
+                    converter = allowed = ("converter" in grant["sequence"] and oa.CONVERTER in grant["endpoints"]
+                                           and bool(lookup["doi"]) and query.get("ids") == [lookup["doi"]] and not bound["converted"])
+                elif url.startswith(oa.BUCKET):
+                    found = set(re.findall(r"PMC[1-9][0-9]*", url))
+                    allowed = ("cloud" in grant["sequence"] and oa.BUCKET in grant["endpoints"] and bound["pmcid"] is not None
+                               and found == {bound["pmcid"]})
+                else:
+                    allowed = False
+                if not allowed:
+                    self.violation = "outside_grant"
+                    raise Problem("outside_grant", "This request is outside the approved lookup.", 403)
+                response = transport.get(url, **kwargs)
+                if converter:
+                    bound["converted"] = True
+                    bound["pmcid"] = pipes.converted_pmcid(response, lookup["doi"])
+                return response
+        return Granted()
+
+    @staticmethod
+    def converted_pmcid(response, doi):
+        """The single PMCID the converter returned for the approved DOI; only that one may follow at the Cloud Service."""
+        try:
+            status, _, raw = response
+            records = json.loads(raw).get("records") if status == 200 else None
+            record = records[0] if isinstance(records, list) and len(records) == 1 and isinstance(records[0], dict) else {}
+            if (record.get("doi") or "").lower() != doi:
+                return None
+            return (oa.pmcid(record.get("pmcid") or "") or (None,))[0]
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    def acquire(self, job, scope, chat, run_id, step_id, paper_ids, private, transport=None, grants=None):
         guided = settings.guided(self.config())
         install = installer.install_location(self.root, "pqa")
         python = venv_python(install[1] / "venv") if install else None
@@ -1548,53 +1699,70 @@ class Pipelines:
         started = monotonic()
         results = []
         directory = self.projects.files_directory(scope, chat)
-        for paper in paper_ids:
-            job.checkpoint()
-            if monotonic() - started > oa.PASS_DEADLINE:
-                break
-            with self.projects.connect() as db:
-                row = dict(db.execute("SELECT * FROM pipeline_paper WHERE id=? AND run_id=?", (paper, run_id)).fetchone())
-                run = self.run_row(db, run_id)
-                totals = db.execute("""SELECT count(*), COALESCE(sum(a.size_bytes),0) FROM artifact a JOIN pipeline_step s ON s.id=a.step_id
-                                       WHERE s.run_id=? AND a.role='source_pdf' AND a.origin_class='public_acquired'""", (run_id,)).fetchone()
-            if run["state"] in TERMINAL_RUN:
-                break
-            if row["origin_class"] != "public_native" and not private:
-                continue
-            used = {"files": totals[0], "bytes": totals[1]}
+        counts = {"selected": len(paper_ids), "processed": 0, "pending": len(paper_ids), "skipped": 0, "failed": 0, "running": True}
 
-            def budget(size):
-                if size is None:
-                    return used["files"] < oa.RUN_FILES
-                return used["files"] + 1 <= oa.RUN_FILES and used["bytes"] + size <= oa.RUN_BYTES
+        def progress(final=False):
+            counts["running"] = not final
+            with self.projects.connect(write=True) as db:
+                self.detail(db, step_id, acquisition=dict(counts))
+                self.bump(db, run_id)
 
-            lookup = dict(row)
-            if private == "converter":
-                # The private converter stage resolves only the identifier; the Cloud Service step needs its own approval.
-                result = self.convert_only(transport, lookup, guided["contact"])
-            elif not python:
-                result = oa.Result("manual_review", lookup.get("doi") or "", "pmc", error="parser_unavailable")
-            else:
-                result = oa.acquire(transport, lookup, contact=guided["contact"], temp_dir=directory, python=python,
-                                    version=row["confirmed_version"], budget=budget)
-            results.append(self.record_acquisition(scope, chat, run, step_id, row, result, private))
-        self.notify()
-        return {"papers": results}
-
-    def convert_only(self, transport, row, contact):
-        found, problem = oa.identifiers(row)
-        if problem or not found or not found.get("doi"):
-            return oa.Result("rejected", "", "pmc-idconv", error=problem or "needs_doi")
-        if not contact:
-            return oa.Result("unresolved", found["doi"], "pmc-idconv", error="contact_needed")
+        progress()
         try:
-            accession, url = oa.convert_doi(transport, found["doi"], contact, monotonic() + oa.PAPER_DEADLINE, found.get("pmid"))
-        except Problem as error:
-            return oa.Result("failed_retryable" if error.status >= 503 else "manual_review", found["doi"], "pmc-idconv", error=error.code)
-        if not accession:
-            return oa.Result("unresolved", found["doi"], "pmc-idconv", error="no_pmc_mapping")
-        return oa.Result("unresolved", found["doi"], "pmc-idconv", pmcid=accession, error="pmcid_resolved_review_cloud_lookup",
-                         metadata_url=oa.CONVERTER)
+            for paper in paper_ids:
+                job.checkpoint()
+                if monotonic() - started > oa.PASS_DEADLINE:
+                    break
+                with self.projects.connect() as db:
+                    row = dict(db.execute("SELECT * FROM pipeline_paper WHERE id=? AND run_id=?", (paper, run_id)).fetchone())
+                    run = self.run_row(db, run_id)
+                    totals = db.execute("""SELECT count(*), COALESCE(sum(a.size_bytes),0) FROM artifact a JOIN pipeline_step s ON s.id=a.step_id
+                                           WHERE s.run_id=? AND a.role='source_pdf' AND a.origin_class='public_acquired'""", (run_id,)).fetchone()
+                if run["state"] in TERMINAL_RUN:
+                    break
+                counts["pending"] -= 1
+                if row["origin_class"] != "public_native" and not grants:
+                    counts["skipped"] += 1
+                    continue
+                if grants and not self.grant_matches(paper, grants[paper]):
+                    result = oa.Result("rejected", row.get("doi") or row.get("pmcid") or "", "grant", error="changed_after_approval")
+                    results.append(self.record_acquisition(scope, chat, run, step_id, row, result, private))
+                    counts["skipped"] += 1
+                    progress()
+                    continue
+                used = {"files": totals[0], "bytes": totals[1]}
+
+                def budget(size):
+                    if size is None:
+                        return used["files"] < oa.RUN_FILES
+                    return used["files"] + 1 <= oa.RUN_FILES and used["bytes"] + size <= oa.RUN_BYTES
+
+                if not python:
+                    result = oa.Result("manual_review", row.get("doi") or "", "pmc", error="parser_unavailable")
+                else:
+                    channel = self.grant_transport(transport, paper, grants[paper]) if grants else transport
+                    try:
+                        result = oa.acquire(channel, dict(row), contact=guided["contact"], temp_dir=directory, python=python,
+                                            version=row["confirmed_version"], budget=budget)
+                    except Problem as error:
+                        result = oa.Result("rejected", row.get("doi") or row.get("pmcid") or "", "grant", error=error.code)
+                    if getattr(channel, "violation", None):
+                        # A grant check refused a request; no request outside the grant was sent.
+                        if result.temp:
+                            Path(result.temp).unlink(missing_ok=True)
+                        result = oa.Result("rejected", row.get("doi") or row.get("pmcid") or "", "grant", error=channel.violation)
+                results.append(self.record_acquisition(scope, chat, run, step_id, row, result, private))
+                if result.outcome in ("acquired", "existing_match"):
+                    counts["processed"] += 1
+                elif result.outcome == "rejected" and result.error in ("changed_after_approval", "outside_grant"):
+                    counts["skipped"] += 1
+                else:
+                    counts["failed" if result.outcome in ("failed_retryable", "rejected") else "processed"] += 1
+                progress()
+        finally:
+            progress(final=True)
+            self.notify()
+        return {"papers": results}
 
     def record_acquisition(self, scope, chat, run, step_id, row, result, private):
         artifact = None
@@ -1618,9 +1786,7 @@ class Pipelines:
                         result.licence, result.outcome, result.error, artifact, result.sha256))
             status = {"acquired": "oa_acquired", "failed_retryable": "failed_retryable"}.get(result.outcome)
             updates = {"access_status": status} if status else {}
-            if result.pmcid and not row["pmcid"] and private != "converter":
-                updates["pmcid"] = result.pmcid
-            if private == "converter" and result.pmcid:
+            if result.pmcid and not row["pmcid"]:
                 updates["pmcid"] = result.pmcid
             if updates:
                 db.execute(f"UPDATE pipeline_paper SET {','.join(f'{key}=?' for key in updates)}, updated_at=? WHERE id=?",
@@ -1770,7 +1936,7 @@ class Pipelines:
     def reconcile(self):
         with self.projects.connect() as db:
             steps = [dict(row) for row in db.execute("""SELECT s.* FROM pipeline_step s JOIN pipeline_run r ON r.id=s.run_id
-                       WHERE s.state IN ('running','surveying','waiting_native','awaiting_disclosure')
+                       WHERE s.state IN ('running','surveying','awaiting_disclosure')
                        AND r.state NOT IN ('succeeded','failed','cancelled')""")]
         for step in steps:
             folder = self.attempt_dir(step["id"])
@@ -1782,12 +1948,25 @@ class Pipelines:
                     self.projects.recover_publication(run["project_id"], run["chat_id"], marker)
                 except (Problem, OSError):
                     pass
+            if step["state"] in ("running", "surveying") and folder.exists():
+                gptr_pipeline.terminate_orphan(folder)
+                if step["step_key"] in LDR_STEPS:
+                    self.record_step_usage(step["id"], child(folder, "usage.jsonl"), self.ldr_key(), interrupted=True)
+                elif step["step_key"] in ("survey", *REPORT_MODES):
+                    mode = "research_report" if step["step_key"] == "survey" else REPORT_MODES[step["step_key"]][0]
+                    self.record_step_usage(step["id"], child(folder, "usage.jsonl"), self.gptr_key(mode), interrupted=True)
             with self.projects.connect(write=True) as db:
                 current = self.step(db, step["id"])
                 if current["state"] in ("running", "surveying"):
-                    completion = read_json(child(folder, "completion.json"), None) if folder.exists() else None
+                    try:
+                        completion = read_json(child(folder, "completion.json"), None) if folder.exists() else None
+                    except ValueError:
+                        completion = None
                     recovery = None
-                    if completion and completion.get("status") == "succeeded" and completion.get("outputs"):
+                    if current["step_key"] in LDR_STEPS:
+                        if folder.exists() and ldr_pipeline.collect(folder, gptr_pipeline.ProcessResult("exited", 0, 0.0, []))["status"] == "succeeded":
+                            recovery = {"outputs": completion["outputs"]}
+                    elif completion and completion.get("status") == "succeeded" and completion.get("outputs"):
                         output = completion["outputs"][0]
                         path = child(folder, "outputs", output["name"])
                         if path.is_file() and file_digest(path) == output["sha256"]:
@@ -1797,10 +1976,6 @@ class Pipelines:
                     if recovery:
                         self.detail(db, step["id"], recovery=recovery)
                     self.bump(db, step["run_id"], "interrupted")
-                elif current["state"] == "waiting_native":
-                    self.set_step(db, step["id"], "paused", error_code="grant_expired",
-                                  error_detail="RAH restarted. Use Reopen LDR handoff to save the result from LDR history; research is not resubmitted.")
-                    self.bump(db, step["run_id"], "paused")
                 elif current["state"] == "awaiting_disclosure":
                     db.execute("UPDATE chat_entry SET preview_id=NULL WHERE id=?", (current["entry_id"],))
 

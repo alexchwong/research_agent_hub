@@ -70,3 +70,19 @@ def test_guided_export_endpoint_requires_live_grant(api):
                            headers={"X-RAH-Export": "a" * 64, "X-RAH-Format": "ris", "X-RAH-Result": str(uuid4()),
                                     "Content-Type": "application/octet-stream"})
     assert response.status_code == 403
+
+
+def test_workspace_public_start_and_read_only_pqa_preflight(api):
+    call, chat, hub, client = api
+    status, workspace = call("get", "/workspace")
+    start = workspace["guided"]["public_start"]
+    assert status == 200 and start["available"] and start["display_digest"]
+    base = f"/projects/{chat}/chats/{chat}/pipelines"
+    status, preview = call("post", base + "/preview", {"purpose": "rapid_research", "profile": "standard", "question": "Public Q?"})
+    assert preview["display_digest"] == start["display_digest"]
+    runs = sorted(path.name for path in (hub.root / "hub/runs").iterdir())
+    status, error = call("post", f"/projects/{chat}/pqa-preflight", {"pdfs": [], "question": "Q", "quality": "standard"})
+    assert status >= 400 and error["code"] in ("profile_unavailable", "unverified_profile", "pdf_selection")
+    assert call("post", f"/projects/{chat}/pqa-preflight", {"pdfs": [], "question": "Q", "extra": 1})[0] == 422
+    assert sorted(path.name for path in (hub.root / "hub/runs").iterdir()) == runs
+    assert client.post(f"/api/projects/{chat}/pqa-preflight", base_url="http://127.0.0.1:8500", json={}).status_code == 401

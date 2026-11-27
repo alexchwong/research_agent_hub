@@ -32,15 +32,72 @@ function say(text) {
   message.textContent = text || "";
 }
 
-function button(text, action) {
+// Recovery actions offered beside an inline error, by error code (spec §3.6). Cards add their own in-place actions.
+const recoveries = {};
+for (const code of ["needs_credential", "authorization_failed", "insufficient_credit", "settings_stale",
+  "scope_gate_unavailable", "ldr_headless_unavailable"]) recoveries[code] = ["Open Settings", () => choose("settings")];
+for (const code of ["unsupported_retriever", "needs_search_credential", "search_configuration", "no_sources"])
+  recoveries[code] = ["Open Settings → Search sources", () => choose("settings", "search")];
+for (const code of ["app_not_installed", "native_install", "worker_start", "unverified_route"])
+  recoveries[code] = ["Open App details", () => choose("apps")];
+
+function recovery(code) {
+  const entry = recoveries[code];
+  if (!entry) return null;
+  const node = element("button", entry[0]);
+  node.type = "button";
+  node.onclick = () => entry[1]();
+  return node;
+}
+
+function inlineError(node, error) {
+  const row = node.closest(".sub-actions, .dialog-actions, .composer-footer, .composer-tools, p, li, div, section") || node.parentElement;
+  if (!row || !node.isConnected) { say(error.message); return; }
+  let box = row.nextElementSibling?.classList?.contains("inline-error") ? row.nextElementSibling : null;
+  if (!box) {
+    box = element("p");
+    box.className = "inline-error";
+    box.setAttribute("role", "alert");
+    row.after(box);
+  }
+  box.replaceChildren(document.createTextNode(error.message || "The operation failed."));
+  const action = recovery(error.code);
+  if (action) box.append(" ", action);
+}
+
+function clearInlineError(node) {
+  const row = node.closest(".sub-actions, .dialog-actions, .composer-footer, .composer-tools, p, li, div, section") || node.parentElement;
+  const box = row?.nextElementSibling;
+  if (box?.classList?.contains("inline-error")) box.remove();
+}
+
+// Every click registers: the button disables and relabels before any await, and errors appear beside it (spec §3.1).
+function button(text, action, busy = "Working…") {
   const node = element("button", text);
   node.type = "button";
+  node.dataset.label = text;
   node.onclick = async () => {
+    if (node.disabled) return;
     node.disabled = true;
-    say("");
-    try { await action(); }
-    catch (error) { say(error.message); }
-    finally { node.disabled = false; }
+    node.setAttribute("aria-busy", "true");
+    node.textContent = busy;
+    const status = value => { node.textContent = value; };
+    let result;
+    try {
+      clearInlineError(node);
+      result = await action(status);
+    } catch (error) {
+      node.textContent = node.dataset.label;
+      node.disabled = false;
+      node.removeAttribute("aria-busy");
+      if (node.isConnected) inlineError(node, error);
+      else say(error.message);
+      return;
+    }
+    if (result && result.keepDisabled) return;
+    node.textContent = node.dataset.label;
+    node.disabled = false;
+    node.removeAttribute("aria-busy");
   };
   return node;
 }
@@ -302,6 +359,7 @@ async function settings() {
   }));
   const guided = section(view, "Guided research", "Automatic open-access download is off by default. When on, RAH sends only exact public DOIs or PMCIDs to the official PMC services; every PDF transfer to PaperQA2 still needs its own review.");
   const search = section(view, "Search sources", "The default literature searches need no separate search key. Search still sends queries to the selected service; model calls use your existing model settings.");
+  search.id = "view-search";
   search.append(element("p", "PaperQA2 searches the PDFs you select. It does not need an external search key."));
   const searchFields = {gptr: ["GPT Researcher", "RAH_NATIVE_GPTR__RETRIEVER", "RAH_NATIVE_GPTR__SEARX_URL"],
     ldr: ["Local Deep Research", "RAH_NATIVE_LDR__LDR_SEARCH_TOOL", "RAH_NATIVE_LDR__LDR_SEARCH_ENGINE_WEB_SEARXNG_DEFAULT_PARAMS_INSTANCE_URL"]};
@@ -632,13 +690,15 @@ async function showProject(id, answerId, panel, chat) {
 }
 
 const views = {apps, workflows, usage, settings};
-async function choose(name) {
+async function choose(name, anchor) {
   screen = name;
   document.querySelectorAll("[data-view]").forEach(node => {
     if (node.dataset.view === name) node.setAttribute("aria-current", "page");
     else node.removeAttribute("aria-current");
   });
   view.replaceChildren(element("p", "Loading…"));
-  try { await views[name](); }
-  catch (error) { say(error.message); }
+  try {
+    await views[name]();
+    if (anchor) document.getElementById("view-" + anchor)?.scrollIntoView();
+  } catch (error) { say(error.message); }
 }

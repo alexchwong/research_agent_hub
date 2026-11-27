@@ -29,3 +29,16 @@ The installer’s affirmative confirmation or explicit CLI setup is the installa
 | **B6 · Monitor costs** | Advertised OpenRouter prices from the cached catalogue, native cost estimates and directly observed Scope Gate usage where returned, plus shared-key Usage. No ceilings or billing claims; query counts are targets. |
 | **B7 · Private data control** | Open-access lookups send only exact public identifiers when opted in; private-origin identifiers need per-destination approval. Every PaperQA2 run reviews the actual files, question and per-role providers. Manual acquisition and explicit subset selection remain. |
 | **B8 · Release discipline** | Transactional schema upgrade with a verified backup, shipped worker digest and disabled-candidate gate, separated P0–P5 and P6 evidence, a changed-path ZIP and no commit, push or release. |
+
+## Chat-first guided research (spec v2 §7)
+
+| Rule | Amendment |
+|---|---|
+| **B1 · No agentic harness** | Headless LDR is one documented upstream call (`quick_summary`) with the approved prompt plus LDR's own RIS exporter. RAH chooses no query, source, strategy or next step. Usage observation and status polling are passive. |
+| **B2 · Independent upstreams** | Two public upstream functions and a transport observer scoped to RAH-launched processes. Native LDR data, history and launcher are untouched; headless runs use a private data directory. Native UIs stay in Classic apps. |
+| **B3 · Native choice** | Headless runs use the user's RAH settings for LDR. A `native` LDR role makes guided LDR unavailable rather than overriding it. |
+| **B4 · Three core apps** | No new app, service or dependency. |
+| **B5 · Honest settings** | No new settings keys. Disclosures are rendered from effective settings; the scope approval states which settings apply to headless LDR and lists its fixed hosts and the public-web class. |
+| **B6 · Monitor costs** | Per-entry figures are OpenRouter's per-response records, labelled complete only with qualified coverage. No ceilings. |
+| **B7 · Private data control** | Each PaperQA2 transfer is approved against a server-built disclosure that the bound preview must reproduce, and `run_paper` re-verifies the binding. Private lookups use an immutable per-paper grant checked before every request. Headless LDR receives only the approved public prompt. |
+| **B8 · Release discipline** | Evidence reported under three labels; docs updated; changed-path ZIP; no commit, push or release. |

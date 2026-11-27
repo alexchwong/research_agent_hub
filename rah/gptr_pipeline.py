@@ -3,7 +3,9 @@
 Runs the pinned native CLI as a direct argument list in its own process group, with a private working
 directory and a per-operation settings projection. GPT Researcher owns planning, search and writing.
 """
+from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
 import os
 import re
 import signal
@@ -109,10 +111,20 @@ def recipients(env):
             "fetches": "External search results can lead GPT Researcher to fetch public source pages."}
 
 
-def command(install, mode, question):
+def observer_command(folder, python, target, args):
+    """Wrap one upstream entry point with the OpenRouter usage observer, copied into this attempt's folder."""
+    from importlib import resources
+    from .common import atomic
+    observer = child(folder, "openrouter_observer.py")
+    atomic(observer, resources.files("rah").joinpath("openrouter_observer.py").read_bytes())
+    return [str(python), str(observer), "--out", str(child(folder, "usage.jsonl")), "--", str(target), *args]
+
+
+def command(install, mode, question, folder):
     from .common import venv_python
-    return [str(venv_python(install / "venv")), str(install / "source" / "cli.py"), "--report_type", mode,
-            "--report_source", "web", "--no-pdf", "--no-docx", "--", question]
+    private_directory(folder)
+    return observer_command(folder, venv_python(install / "venv"), install / "source" / "cli.py",
+                            ["--report_type", mode, "--report_source", "web", "--no-pdf", "--no-docx", "--", question])
 
 
 def frontmatter(head):
@@ -187,42 +199,123 @@ def classify(counters, returncode):
     return Problem("native_failed", f"GPT Researcher exited with status {returncode}. Check its search source and model settings.", 503)
 
 
-def run(attempt_dir, argv, env, *, deadline, job=None, step=None, attempt=None, operation=None):
-    """Run one CLI attempt. Returns the single new Markdown output and native metadata."""
+@dataclass
+class ProcessResult:
+    status: str  # exited | cancelled | timeout | start_failed
+    exit_code: int | None
+    elapsed: float
+    counters: list
+
+
+def run_group(attempt_dir, argv, env, *, deadline, job=None, stdin=None, tick=None, step=None, attempt=None, operation=None):
+    """Run one child in its own process group. Writes operation.json and process.json, never completion.json."""
     workdir = private_directory(attempt_dir)
-    outputs = private_directory(child(workdir, "outputs"))
-    before = {path.name for path in outputs.iterdir()}
     write_json(child(workdir, "operation.json"), {"step": step, "attempt": attempt, "operation": operation,
                                                   "started_at": now(), "argv_digest": digest(canonical(argv[2:]))})
     options = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
     started = monotonic()
-    status = "failed"
-    returncode = None
+    status, returncode, counters = "start_failed", None, []
+
+    def record():
+        write_json(child(workdir, "process.json"), {"status": status, "exit_code": returncode,
+                                                    "elapsed": round(monotonic() - started, 3), "finished_at": now()})
+
     try:
-        process = subprocess.Popen(argv, cwd=workdir, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, shell=False, **options)
+        process = subprocess.Popen(argv, cwd=workdir, env=env, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, **options)
     except OSError as error:
-        write_json(child(workdir, "completion.json"), {"status": "start_failed", "finished_at": now()})
-        raise Problem("worker_start", "GPT Researcher could not start. Repair it in App details.", 503) from error
+        record()
+        raise Problem("worker_start", "The research app could not start. Repair it in App details.", 503) from error
+    status = "running"
+    write_json(child(workdir, "operation.json"), {"step": step, "attempt": attempt, "operation": operation,
+                                                  "started_at": now(), "argv_digest": digest(canonical(argv[2:])),
+                                                  "pid": process.pid})
     counters = [Counter(process.stdout), Counter(process.stderr)]
     try:
+        if stdin is not None:
+            try:
+                process.stdin.write(stdin)
+                process.stdin.close()
+            except OSError:
+                pass
+        last_tick = 0.0
         while process.poll() is None:
             if job is not None and job.requested:
                 status = "cancelled"
                 terminate(process)
-                raise Problem("cancelled", "Operation cancelled.", 409)
+                break
             if monotonic() - started >= deadline:
                 status = "timeout"
                 terminate(process)
-                raise Problem("stage_timeout", f"GPT Researcher did not finish within {deadline // 60} minutes. "
-                              "The stage is incomplete; retry when ready.", 504)
+                break
+            if tick is not None and monotonic() - last_tick >= 1:
+                last_tick = monotonic()
+                try:
+                    tick()
+                except Exception:  # Status display must never stop the stage.
+                    pass
             sleep(0.1)
         returncode = process.returncode
         for counter in counters:
             counter.thread.join(timeout=5)
+        if status == "running":
+            status = "exited"
+        return ProcessResult(status, returncode, round(monotonic() - started, 3), counters)
+    finally:
+        if process.poll() is None:
+            terminate(process)
+            if status == "running":
+                status = "cancelled"
+        returncode = process.returncode if returncode is None else returncode
+        record()
+
+
+def terminate_orphan(attempt_dir):
+    """After a hub restart: stop a child group the dead hub never reaped (no process.json was written)."""
+    if child(attempt_dir, "process.json").exists():
+        return False
+    try:
+        pid = json.loads(child(attempt_dir, "operation.json").read_bytes()).get("pid")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not isinstance(pid, int) or pid <= 1:
+        return False
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=30, check=False)
+        else:
+            os.killpg(pid, signal.SIGKILL)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return True
+
+
+def run(attempt_dir, argv, env, *, deadline, job=None, step=None, attempt=None, operation=None, tick=None):
+    """Run one CLI attempt. Returns the single new Markdown output and native metadata."""
+    workdir = private_directory(attempt_dir)
+    outputs = private_directory(child(workdir, "outputs"))
+    before = {path.name for path in outputs.iterdir()}
+    status = "failed"
+    returncode = None
+    try:
+        try:
+            result = run_group(workdir, argv, env, deadline=deadline, job=job, tick=tick, step=step, attempt=attempt,
+                               operation=operation)
+        except Problem as error:
+            status = "start_failed"
+            raise Problem("worker_start", "GPT Researcher could not start. Repair it in App details.", 503) from error
+        returncode = result.exit_code
+        if result.status == "cancelled":
+            status = "cancelled"
+            raise Problem("cancelled", "Operation cancelled.", 409)
+        if result.status == "timeout":
+            status = "timeout"
+            raise Problem("stage_timeout", f"GPT Researcher did not finish within {deadline // 60} minutes. "
+                          "The stage is incomplete; retry when ready.", 504)
         if returncode:
             status = "failed"
-            raise classify(counters, returncode)
+            raise classify(result.counters, returncode)
         created = sorted(path for path in outputs.iterdir() if path.name not in before and path.suffix.lower() == ".md")
         if len(created) != 1 or created[0].is_symlink() or not created[0].is_file():
             status = "failed"
@@ -240,11 +333,9 @@ def run(attempt_dir, argv, env, *, deadline, job=None, step=None, attempt=None, 
         return {"path": path, "name": path.name, "sha256": checksum, "size": size, "sources_count": count,
                 "title": fields.get("title", "").strip('"')[:300] or None,
                 "total_cost_usd": fields.get("total_cost_usd") if re.fullmatch(r"[0-9.eE-]{1,32}", fields.get("total_cost_usd", "")) else None,
-                "stdout_bytes": counters[0].total, "stderr_bytes": counters[1].total}
+                "stdout_bytes": result.counters[0].total, "stderr_bytes": result.counters[1].total}
     finally:
-        if process.poll() is None:
-            terminate(process)
-        record = {"status": status, "exit_code": returncode, "finished_at": now(), "elapsed": round(monotonic() - started, 3)}
+        record = {"status": status, "exit_code": returncode, "finished_at": now()}
         if status == "succeeded":
             record["outputs"] = [{"name": path.name, "sha256": checksum, "size": size}]
         write_json(child(workdir, "completion.json"), record)

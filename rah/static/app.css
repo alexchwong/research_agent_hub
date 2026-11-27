@@ -159,3 +159,17 @@ dialog blockquote, .turn blockquote, .chips blockquote { margin: .65rem 0; paddi
 
 .model-table { border-collapse: collapse; font-size: .82rem; margin: .5rem 0; }
 .model-table th, .model-table td { border: 1px solid var(--line); padding: .3rem .5rem; text-align: left; overflow-wrap: anywhere; }
+
+.inline-error { margin: .3rem 0; padding: .4rem .65rem; border: 1px solid #efdac6; border-radius: .5rem; background: #fff6ec; color: #733b20; font-size: .85rem; }
+.inline-error button { margin-left: .4rem; font-size: .8rem; }
+[aria-busy="true"] { cursor: progress; opacity: .7; }
+button[aria-busy="true"]::before { content: ""; display: inline-block; width: .7em; height: .7em; margin-right: .4em; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; vertical-align: -.05em; animation: rah-spin .8s linear infinite; }
+@keyframes rah-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { button[aria-busy="true"]::before { animation: none; } }
+.stage-progress { display: block; width: 100%; max-width: 28rem; height: .5rem; margin: .45rem 0 .15rem; accent-color: var(--accent); }
+.stalled { color: #733b20; font-weight: 600; }
+.now-line { margin: .3rem 0; font-size: .85rem; color: var(--muted); }
+.usage-row { margin: .35rem 0; font-size: .8rem; color: var(--muted); }
+.reconnecting { background: #f3e8dd !important; color: #733b20; }
+.send-papers ol, .send-papers ul { margin: .3rem 0; padding-left: 1.3rem; font-size: .85rem; }
+.start-disclosure p { margin: .3rem 0; font-size: .82rem; color: var(--muted); }

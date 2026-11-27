@@ -8,7 +8,9 @@ from uuid import uuid4
 
 import pytest
 
-from rah import pqa_profiles, scope_gate, settings, upstreams
+import webbrowser
+
+from rah import ldr_pipeline, pqa_profiles, scope_gate, settings, upstreams, usage
 from rah.common import Problem, atomic, digest, prepare_root, private_directory, venv_python, write_json
 from rah.installer import RouteBook
 from rah.jobs import Jobs
@@ -36,6 +38,40 @@ Path("outputs/out.md").write_text('---\ntitle: "T"\nsources_count: ' + count + '
 QUESTIONS = json.dumps({"questions": [
     {"question": "Which population?", "selection": "single", "options": ["Adults", "Children"]},
     {"question": "Which outcomes?", "selection": "multiple", "options": ["Survival", "Toxicity", "Cost"]}]})
+FAKE_LDR = r'''
+import json, math, time
+from pathlib import Path
+MODE = __MODE__
+RIS = __RIS__
+
+
+def quick_summary(query, progress_callback=None, **kwargs):
+    assert not kwargs
+    Path("query.json").write_text(json.dumps(query))
+    for percent in (None, 10, float("nan"), "40", True, -5, 150):
+        progress_callback("LDR step \x07", percent, {"phase": "search"} if percent == 10 else None)
+    if MODE == "hang":
+        time.sleep(60)
+    if MODE == "crash":
+        raise RuntimeError("boom")
+    if MODE == "empty":
+        return {"research_id": "r1", "formatted_findings": "", "sources": [], "sources_count": 0}
+    count = 0 if MODE == "no_sources" else 2
+    return {"research_id": "r1", "sources_count": count, "sources": [],
+            "formatted_findings": "# LDR answer\n\nFindings.\n\n## Sources\n\n[1] Public trial\nURL: https://pubmed.ncbi.nlm.nih.gov/555/\n"}
+
+
+class Result:
+    def __init__(self, content):
+        self.content = content
+
+
+class RISExporter:
+    def export(self, markdown):
+        if MODE == "exporter_error":
+            raise ValueError("bad")
+        return Result({"no_ris": b"", "bad_ris": b"not ris", "untitled": b"TY  - ELEC\nUR  - https://x.org/a\nER  - \n"}.get(MODE, RIS.encode()))
+'''
 RIS = ("TY  - ELEC\nTI  - Public trial\nDO  - 10.1000/xyz\nUR  - https://pubmed.ncbi.nlm.nih.gov/555/\nER  - \n"
        "TY  - ELEC\nTI  - PMC paper\nUR  - https://pmc.ncbi.nlm.nih.gov/articles/PMC888/\nER  - \n")
 
@@ -57,6 +93,25 @@ class Hub:
         (self.install / "source").mkdir()
         (self.install / "source/cli.py").write_text(FAKE_CLI)
         ldr_install = private_path(self.root, "apps/ldr/versions/fake")
+        ldr_python = venv_python(ldr_install / "venv")
+        ldr_python.parent.mkdir(parents=True)
+        ldr_python.symlink_to(sys.executable)
+        self.ldr_mode = "ok"
+        real_command = ldr_pipeline.command
+
+        def command(install, attempt_dir):
+            # The fake upstream package sits beside the runner, which is first on its import path.
+            package = attempt_dir / "local_deep_research"
+            for name in ("", "api", "exporters"):
+                (package / name).mkdir(parents=True, exist_ok=True)
+                (package / name / "__init__.py").write_text("")
+            source = FAKE_LDR.replace("__MODE__", repr(self.ldr_mode)).replace("__RIS__", repr(RIS))
+            (package / "api/research_functions.py").write_text(source)
+            (package / "exporters/ris_exporter.py").write_text(source)
+            return real_command(install, attempt_dir)
+
+        monkeypatch.setattr(ldr_pipeline, "command", command)
+        monkeypatch.setattr(webbrowser, "open", Mock(side_effect=AssertionError("guided research opened a browser")))
         real = RouteBook.load()
         rows = {"gptr": {"upstream_version": "3.8.0", "lock_sha256": "a" * 64, "lock_path": "x"},
                 "ldr": {"upstream_version": "2.0.1", "lock_sha256": "b" * 64, "lock_path": "y", "structured_citations": "ldr-ris-v1"},
@@ -74,17 +129,14 @@ class Hub:
                                                    "completion_tokens": 1, "cost": None}))
         monkeypatch.setattr(scope_gate, "call", self.gate)
         self.pipes = Pipelines(self.root, self.book, self.projects, self.jobs, self.runs)
-        self.native = Mock()
-        self.native.ldr_process.return_value = {"generation": "g1", "stale": False}
-        self.native.open_ldr.return_value = {"opened": True, "prefill_prepared": True}
-        self.pipes.native = self.native
         self.chat = self.projects.create_chat(None)["id"]
         self.scope = self.chat
 
     def write_config(self, text):
         atomic(self.root / "hub/config/.env", text.encode())
         config = settings.load(self.root)
-        settings.install_projection(self.root, "gptr", settings.resolve(config, "gptr", RouteBook.load().capabilities("gptr")), True)
+        for app in ("gptr", "ldr"):
+            settings.install_projection(self.root, app, settings.resolve(config, app, RouteBook.load().capabilities(app)), True)
 
     def start(self, purpose, question="Effects of drug X on outcome Y?", profile="standard"):
         preview = self.pipes.preview(self.scope, self.chat, {"purpose": purpose, "profile": profile, "question": question})
@@ -131,10 +183,9 @@ def scope_to_brief(hub, run, broad=False):
     answers = {} if broad else {questions[0]["id"]: {"selected": [questions[0]["options"][0]["id"]]},
                                 questions[1]["id"]: {"selected": [questions[1]["options"][0]["id"], questions[1]["options"][1]["id"]]}}
     preview, _ = hub.act(run, "preview_scope", {"answers": answers, "instructions": "", "broad": broad})
-    if not broad:
-        with pytest.raises(Problem):
-            hub.act(run, "approve_scope", {"digest": preview["digest"]})
-    result, _ = hub.act(run, "approve_scope", {"digest": preview["digest"], "constraints_reviewed": True})
+    with pytest.raises(Problem):
+        hub.act(run, "approve_scope", {"digest": preview["digest"], "constraints_reviewed": True})
+    result, _ = hub.act(run, "approve_scope", {"digest": preview["digest"]})
     return preview, result
 
 
@@ -231,11 +282,32 @@ def test_route_change_requires_reconfirmation(hub):
     assert hub.gate.call_count == 1
 
 
-def test_process_restart_requires_route_review(hub):
+def test_restart_and_age_alone_never_require_reconfirmation(hub):
     run, _ = hub.start("rapid_research")
-    hub.pipes.generation = "restarted"
+    with hub.projects.connect(write=True) as db:
+        db.execute("UPDATE pipeline_approval SET decided_at='2000-01-01T00:00:00+00:00'")
+    restarted = Pipelines(hub.root, hub.book, hub.projects, hub.jobs, hub.runs)
+    hub.pipes.close()
+    hub.pipes = restarted
+    data = hub.settle(run, {"awaiting_scope"})
+    assert all(step["state"] != "reconfirm_recipients" for step in data["steps"])
+
+
+def test_route_change_names_the_changed_dimension(hub):
+    run, _ = hub.start("rapid_research")
+    hub.write_config("RAH_OPENROUTER_API_KEY=rotated-secret-key\n")
     data = hub.settle(run, {"reconfirm_recipients"})
-    assert "restarted" in data["steps"][-1]["error_detail"]
+    detail = data["steps"][-1]["error_detail"]
+    assert detail.startswith("The saved key changed") and "rotated-secret-key" not in detail
+
+
+def test_rerun_with_unchanged_route_queues_directly(hub):
+    (hub.root / "hub/runs/behaviour.txt").write_text("zero")
+    run, _ = hub.start("deep_research")
+    hub.settle(run, {"paused"})
+    (hub.root / "hub/runs/behaviour.txt").write_text("ok")
+    hub.act(run, "rerun", {"confirm_charges": True})
+    assert hub.get(run)["steps"][-1]["state"] in ("queued", "surveying", "succeeded")
 
 
 def test_request_replay_stale_revision_and_action_replay(hub):
@@ -306,74 +378,32 @@ def test_restart_interrupts_and_reuses_verified_output(hub):
     hub.pipes = restarted
     data = hub.get(run)
     assert data["state"] == "interrupted" and "reuse_output" in data["actions"] and data["recovery"]["outputs"]
-    hub.pipes.generation = restarted.generation
     hub.act(run, "reuse_output", {"digest": data["recovery"]["digest"]})
     assert hub.get(run)["steps"][0]["state"] == "succeeded"
 
 
-def test_ldr_handoff_accepts_cold_start(hub):
-    hub.native.ldr_process.return_value = None
-    run, _ = hub.start("literature_review")
-    scope_to_brief(hub, run)
-    route = hub.settle(run, {"waiting_native"})["native_route"]
-    assert route["process"] == "Not running"
-    stopped_fingerprint = hub.pipes.ldr_route(route["prompt"])[0]
-
-    # The browser starts LDR before submitting the token from the stopped preview.
-    hub.native.ldr_process.return_value = {"generation": "g1", "stale": False}
-    data, status = hub.act(run, "launch_native", {"route_digest": route["digest"], "attest": True})
-    assert status == 200 and data["native"]["prefill_prepared"]
-    info = hub.native.open_ldr.call_args.args[0]
-    assert info["prompt"] == route["prompt"]
-    assert info["generation"] == "g1"
-    assert info["fingerprint"] == hub.pipes.ldr_route(route["prompt"])[0] != stopped_fingerprint
-
-
-@pytest.mark.parametrize("change", ["settings", "credentials", "stale_process", "replaced_process"])
-def test_ldr_handoff_rejects_changed_route(hub, change):
-    hub.native.ldr_process.return_value = {"generation": "g1", "stale": False} if change == "replaced_process" else None
-    run, _ = hub.start("literature_review")
-    scope_to_brief(hub, run)
-    route = hub.settle(run, {"waiting_native"})["native_route"]
-    if change == "settings":
-        hub.write_config("RAH_OPENROUTER_API_KEY=offline-key\nRAH_NATIVE_LDR__LDR_LLM_MODEL=changed-model\n")
-    elif change == "credentials":
-        hub.write_config("RAH_OPENROUTER_API_KEY=replacement-key\n")
-    hub.native.ldr_process.return_value = {"generation": "g2", "stale": change == "stale_process"}
-
-    with pytest.raises(Problem) as rejected:
-        hub.act(run, "launch_native", {"route_digest": route["digest"], "attest": True})
-    assert rejected.value.code == "stale_preview"
-    hub.native.open_ldr.assert_not_called()
-
-
 def literature_to_papers(hub, run):
     scope_to_brief(hub, run)
-    data = hub.settle(run, {"waiting_native"})
-    current = data["steps"][-1]
-    assert data["native_route"]["attestation"].startswith("Native UI overrides are unobserved")
-    hub.act(run, "launch_native", {"route_digest": data["native_route"]["digest"], "attest": True})
-    info = hub.native.open_ldr.call_args.args[0]
-    assert info["prompt"] == data["native_route"]["prompt"] and info["step"] == current["id"]
-    result_id = str(uuid4())
-    report = hub.pipes.native_export(info, "md", b"# LDR report", result_id)
-    with pytest.raises(Problem):
-        hub.pipes.native_export(info, "ris", RIS.encode(), str(uuid4()))
-    with pytest.raises(Problem):
-        hub.act(run, "confirm_native_result", {"artifact_ids": [report], "attribution": True, "public_provenance": True})
-    ris = hub.pipes.native_export(info, "ris", RIS.encode(), result_id)
-    assert hub.pipes.native_export(info, "ris", RIS.encode(), result_id) == ris
-    with pytest.raises(Problem):
-        hub.pipes.native_export(info, "ris", RIS.encode() + b"TY  - ELEC\nTI  - X\nER  - \n", result_id)
-    hub.act(run, "confirm_native_result", {"artifact_ids": [report, ris], "attribution": True, "public_provenance": True})
-    return hub.get(run), ris
+    return hub.settle(run, {"awaiting_papers", "paused", "failed"})
 
 
-def test_literature_review_native_handoff_papers_and_unavailable_pdf_route(hub):
+def test_literature_review_headless_ldr_papers_and_unavailable_pdf_route(hub):
     run, _ = hub.start("literature_review")
-    data, ris = literature_to_papers(hub, run)
+    data = literature_to_papers(hub, run)
     assert data["state"] == "awaiting_papers"
+    ldr = next(step for step in data["steps"] if step["step_key"] == "ldr_discovery")
+    assert ldr["state"] == "succeeded" and ldr["detail"]["headless"]
+    assert hub.attempt_file(run, "ldr_discovery", "query.json") == data["brief"]["public_prompts"]["ldr_discovery"]
+    assert {output["role"] for output in ldr["outputs"]} == {"discovery_report", "citation_export"}
+    assert {output["original_name"] for output in ldr["outputs"]} == {"LDR report.md", "LDR citations.ris"}
+    progress = hub.attempt_file(run, "ldr_discovery", "progress.json")
+    assert progress["percent"] == 100 and progress["message"] == "LDR step " and progress["seq"] == 7
+    assert ldr["usage"]["basis"] == "observed" and ldr["usage"]["coverage"] == "unverified"
+    with hub.projects.connect() as db:
+        origins = {row[0] for row in db.execute("SELECT origin_class FROM artifact WHERE step_id=?", (ldr["id"],))}
+    assert origins == {"public_native"}
     papers = data["papers"]
+    ris = next(output["id"] for output in ldr["outputs"] if output["role"] == "citation_export")
     assert papers["source_artifact_id"] == ris
     assert [row.get("pmcid") for row in papers["suggestions"]] == [None, "PMC888"] and papers["suggestions"][0]["pmid"] == "555"
     with pytest.raises(Problem):
@@ -393,21 +423,72 @@ def test_literature_review_native_handoff_papers_and_unavailable_pdf_route(hub):
     assert "finish_partial" in data["actions"]
     result, _ = hub.act(run, "finish_partial")
     assert result["outcome"] == "discovery_only" and result["state"] == "succeeded"
+    webbrowser.open.assert_not_called()
 
 
-def test_corroboration_keeps_two_originals(hub):
+@pytest.mark.parametrize("mode, code", [("no_sources", "no_sources"), ("no_ris", "no_usable_citations"),
+                                        ("bad_ris", "no_usable_citations"), ("untitled", "no_usable_citations"),
+                                        ("exporter_error", "no_usable_citations"), ("empty", "native_output"),
+                                        ("crash", "native_failed")])
+def test_ldr_discovery_never_succeeds_without_usable_citations(hub, mode, code):
+    hub.ldr_mode = mode
+    run, _ = hub.start("literature_review")
+    data = literature_to_papers(hub, run)
+    ldr = next(step for step in data["steps"] if step["step_key"] == "ldr_discovery")
+    assert ldr["state"] == "failed" and ldr["error_code"] == code
+    assert "rerun" in data["actions"] and "papers" not in [step["step_key"] for step in data["steps"]]
+    if mode in ("no_sources", "no_ris", "bad_ris", "untitled", "exporter_error"):
+        assert "discovery_report" in {output["role"] for output in ldr["outputs"]}
+    assert ldr["usage"]["basis"] == "observed"
+    webbrowser.open.assert_not_called()
+
+
+def test_ldr_headless_unavailable_offers_no_approvable_digest(hub):
+    stored = settings.applied(hub.root, "ldr")
+    stored["env"].pop("LDR_LLM_MODEL", None)
+    write_json(hub.root / "apps/ldr/launch/profile.json", stored)
+    run, _ = hub.start("literature_review")
+    data = hub.settle(run, {"awaiting_scope"})
+    questions = data["questionnaires"][0]["questions"]
+    answers = {questions[0]["id"]: {"selected": [questions[0]["options"][0]["id"]]}}
+    try:
+        preview, _ = hub.act(run, "preview_scope", {"answers": answers, "instructions": "", "broad": False})
+    except Problem as error:
+        assert error.code in ("ldr_headless_unavailable", "settings_stale")
+        return
+    assert preview["digest"] is None and preview["route_problem"]["code"] in ("ldr_headless_unavailable", "settings_stale")
+
+
+def test_corroboration_runs_both_headless_and_keeps_two_originals(hub):
     run, _ = hub.start("independent_corroboration")
     scope_to_brief(hub, run)
-    data = hub.settle(run, {"waiting_native"})
-    hub.act(run, "launch_native", {"route_digest": data["native_route"]["digest"], "attest": True})
-    info = hub.native.open_ldr.call_args.args[0]
-    report = hub.pipes.native_export(info, "md", b"# LDR comparison", str(uuid4()))
-    hub.act(run, "confirm_native_result", {"artifact_ids": [report], "attribution": True, "public_provenance": True})
     data = hub.settle(run, {"succeeded"})
     outputs = {step["step_key"]: step["outputs"] for step in data["steps"]}
     assert outputs["ldr_comparison"][0]["producer"] == "Local Deep Research"
     assert outputs["gptr_comparison"][0]["role"] == "research_report"
     assert data["brief"]["public_prompts"]["ldr_comparison"] == data["brief"]["public_prompts"]["gptr_comparison"]
+    webbrowser.open.assert_not_called()
+
+
+def test_cancel_running_ldr_is_cancelled_whatever_completion_says(hub):
+    hub.ldr_mode = "hang"
+    run, _ = hub.start("literature_review")
+    scope_to_brief(hub, run)
+    deadline = monotonic() + 20
+    while monotonic() < deadline:
+        hub.pipes.tick()
+        steps = hub.get(run)["steps"]
+        if steps[-1]["step_key"] == "ldr_discovery" and steps[-1]["state"] == "running" and steps[-1].get("heartbeat"):
+            break
+        sleep(0.1)
+    revision = hub.get(run)["revision"]
+    sleep(1.2)
+    assert hub.get(run)["revision"] == revision  # Heartbeat and progress never bump the revision.
+    hub.act(run, "cancel")
+    deadline = monotonic() + 10
+    while monotonic() < deadline and hub.get(run)["steps"][-1]["state"] != "cancelled":
+        sleep(0.1)
+    assert hub.get(run)["steps"][-1]["state"] == "cancelled"
 
 
 def enable_route(hub, monkeypatch):
@@ -424,7 +505,8 @@ def enable_route(hub, monkeypatch):
     hub.book.route.side_effect = lambda app: row if app == "pqa" else original(app)
     hub.book.directory = hub.root
     entry = {**pqa_profiles.host_identity(), "upstream_version": "fixture", "lock_sha256": lock_hash,
-             "worker_sha256": pqa_profiles.worker_digest(), "providers": {role: "P-" + role for role in pqa_profiles.PAPER_ROLES},
+             "worker_sha256": pqa_profiles.worker_digest(), "observer_sha256": usage.observer_digest(),
+             "providers": {role: "P-" + role for role in pqa_profiles.PAPER_ROLES},
              "evidence_sha256": "f" * 64}
     monkeypatch.setattr(pqa_profiles, "REGISTRY", dict(pqa_profiles.REGISTRY) | {
         "pqa-standard-v1": dict(pqa_profiles.REGISTRY["pqa-standard-v1"]) | {"enabled": (entry,)}})
@@ -482,18 +564,6 @@ def test_analyse_my_papers_decline_cannot_complete(hub, monkeypatch):
     assert data["state"] == "awaiting_disclosure" and "finish_partial" not in data["actions"]
 
 
-def test_trashed_chat_rejects_native_export(hub):
-    run, _ = hub.start("literature_review")
-    scope_to_brief(hub, run)
-    data = hub.settle(run, {"waiting_native"})
-    hub.act(run, "launch_native", {"route_digest": data["native_route"]["digest"], "attest": True})
-    info = hub.native.open_ldr.call_args.args[0]
-    hub.act(run, "cancel")
-    with pytest.raises(Problem):
-        hub.pipes.native_export(info, "ris", RIS.encode(), str(uuid4()))
-    hub.native.revoke.assert_called_with(run["id"])
-
-
 def test_deep_research_papers_automatic_oa_and_private_lookup(hub, monkeypatch):
     from rah import oa
     from test_oa import FakeTransport, listing, metadata
@@ -535,9 +605,9 @@ def test_deep_research_papers_automatic_oa_and_private_lookup(hub, monkeypatch):
     assert private["origin_class"] == "private_or_unknown" and not private["acquisitions"]
     with pytest.raises(Problem):
         hub.act(run, "start_acquisition", {"paper_ids": [private["id"]]})
-    preview = hub.pipes.private_lookup_preview(hub.get(run), private)
-    assert preview["stage"] == "converter" and "10.1000/private" in preview["sends"]
-    hub.act(run, "approve_private_lookup", {"paper_id": private["id"], "stage": "converter", "digest": preview["digest"], "approve": False})
+    batch = hub.get(run)["lookup_batch"]
+    assert [row["paper_id"] for row in batch["rows"]] == [private["id"]] and batch["rows"][0]["sequence"] == ["converter", "cloud"]
+    assert "10.1000/private" in batch["rows"][0]["sends"][0]["identifier"]
     hub.act(run, "select_corpus", {"pdf_ids": [pdf_id], "analysis_question": "Summarise", "route_id": "pqa-standard-v1"})
     rows = {row["id"]: row for row in hub.get(run)["papers"]["rows"]}
     assert rows[acquired[0]["id"]]["state"] == "supplied" and rows[acquired[0]["id"]]["pdf_artifact_id"] == pdf_id
@@ -545,7 +615,7 @@ def test_deep_research_papers_automatic_oa_and_private_lookup(hub, monkeypatch):
         origin = db.execute("SELECT origin_class, role FROM artifact WHERE id=?", (pdf_id,)).fetchone()
         assert tuple(origin) == ("public_acquired", "source_pdf")
         kinds = [row[0] for row in db.execute("SELECT kind || ':' || decision FROM pipeline_approval WHERE kind LIKE 'oa_%'")]
-        assert kinds == ["oa_private:declined"]
+        assert kinds == []
 
 
 def test_registry_ships_disabled_and_guided_runs_never_write_native_settings(hub):
@@ -583,3 +653,21 @@ def test_missing_app_waits_without_dispatch_and_busy_resource_is_fifo(hub, monke
     while hub.jobs.get(busy).active():
         sleep(0.05)
     hub.settle(run, {"awaiting_scope"})
+
+
+def test_public_start_display_digest_matches_preview_and_create_needs_confirmation(hub):
+    shown = hub.pipes.public_start("standard")
+    assert shown["available"] and shown["survey"]["models"] and "question_digest" not in shown["scope_gate"]
+    preview = hub.pipes.preview(hub.scope, hub.chat, {"purpose": "rapid_research", "profile": "standard", "question": "Q?"})
+    assert preview["display_digest"] == shown["display_digest"]
+    with pytest.raises(Problem):
+        hub.pipes.create(hub.scope, hub.chat, {"request_id": str(uuid4()), "purpose": "rapid_research", "profile": "standard",
+                                               "question": "Q?", "public_confirmed": True})
+
+
+def test_usage_recorded_for_survey_and_scope_gate(hub):
+    run, _ = hub.start("rapid_research")
+    data = hub.settle(run, {"awaiting_scope"})
+    survey, gate = data["steps"][0], data["steps"][1]
+    assert survey["usage"]["basis"] == "observed" and survey["usage"]["reason"] == "no_usage_observed"
+    assert gate["usage"]["coverage"] == "qualified" and gate["usage"]["requests"] == 1

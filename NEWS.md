@@ -1,5 +1,13 @@
 # News
 
+## Chat-first guided research (unreleased)
+
+- Guided LDR stages run inside RAH through LDR's Python API: no browser tab, LDR's own progress messages in the card, the report readable in the chat and its RIS citations in Papers Needed. A discovery stage without usable citations fails with its reason and **Rerun this stage…**. Native LDR stays in Classic apps.
+- One click starts public research; re-confirmation only when the route materially changes, naming what changed. No conflict or attestation checkboxes. PDF sends are one click after a server-side transfer check; private identifier lookups are one click per batch.
+- Every button shows that it is working and errors appear beside it. Running stages show elapsed time against their limit, liveness and progress, refreshed every 1.6 s with back-off and "Reconnecting to RAH…".
+- Each model-driven step shows the OpenRouter usage observed for it, labelled complete only on qualified routes.
+- Workspace schema 4 (no downgrade): in-flight work is closed on upgrade.
+
 ## Purpose pipeline refactor (unreleased)
 
 Package metadata stays at 0.1.0. This work ships as a later minor whose number the owner assigns; Co-STORM/SearchClaw keep 0.2.0 and the optional apps keep 0.3.0.

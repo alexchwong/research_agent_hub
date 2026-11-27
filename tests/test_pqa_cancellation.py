@@ -6,18 +6,25 @@ from unittest.mock import Mock
 
 import pytest
 
+from importlib import resources
+
 from rah.common import Problem, clean_env
 from rah.jobs import Job
 from rah.runs import Runs
 
 
 def test_cancel_reaps_owned_paper_worker(tmp_path, monkeypatch):
+    observer = resources.files("rah").joinpath("openrouter_observer.py").read_bytes()
+
     class Script:
         def joinpath(self, name):
-            assert name in ("worker.py", "pqa_profile_worker.py")
+            assert name in ("worker.py", "pqa_profile_worker.py", "openrouter_observer.py")
+            self.name = name
             return self
 
         def read_bytes(self):
+            if self.name == "openrouter_observer.py":
+                return observer
             return b"""import json, sys, time
 from pathlib import Path
 json.load(sys.stdin)

@@ -9,7 +9,7 @@ from importlib import resources
 import platform
 from types import MappingProxyType
 
-from . import installer
+from . import installer, usage
 from .common import Problem, canonical, child, digest, file_digest
 from .research_profiles import MODELS, PQA_ROUTES
 
@@ -33,7 +33,7 @@ def _route(quality, summary, agent, answer):
                       "agent": {"model": MODELS[agent], "endpoint": CHAT},
                       "answer": {"model": MODELS[answer], "endpoint": CHAT},
                       "embedding": {"model": MODELS["embedding_small"], "endpoint": EMBEDDINGS}},
-            # Each enabled identity: platform, arch, python, upstream_version, lock_sha256, worker_sha256,
+            # Each enabled identity: platform, arch, python, upstream_version, lock_sha256, worker_sha256, observer_sha256,
             # providers {role: provider}, evidence_sha256. Added only after P6 qualification and owner approval.
             "enabled": ()}
 
@@ -64,6 +64,7 @@ def identity(key, providers, *, upstream_version, lock_sha256):
     host = host_identity()
     return {"route": key, "profile": route["profile"], "policy": route["policy"], **host,
             "upstream_version": upstream_version, "lock_sha256": lock_sha256, "worker_sha256": worker_digest(),
+            "observer_sha256": usage.observer_digest(),
             "roles": {role: {"model": data["model"], "endpoint": data["endpoint"], "provider": providers.get(role)}
                       for role, data in route["roles"].items()}}
 
@@ -89,6 +90,7 @@ def enabled_entry(key, install_record, route_row):
     for entry in route["enabled"]:
         if (entry.get("platform") == host["platform"] and entry.get("arch") == host["arch"]
                 and entry.get("python") == host["python"] and entry.get("worker_sha256") == worker_digest()
+                and entry.get("observer_sha256") == usage.observer_digest()
                 and entry.get("lock_sha256") == route_row["lock_sha256"] == install_record.get("lock_sha256")
                 and entry.get("upstream_version") == route_row["upstream_version"] == install_record.get("upstream_version")
                 and set(entry.get("providers", {})) == set(route["roles"]) and all(entry["providers"].values())
@@ -126,8 +128,9 @@ def availability(root, book):
     result = {}
     for quality, key in PQA_ROUTES.items():
         try:
-            resolve(root, book, key)
-            result[quality] = {"available": True, "route": key}
+            profile_row = resolve(root, book, key)[2]
+            result[quality] = {"available": True, "route": key, "destinations": profile_row["destinations"],
+                               "destinations_digest": digest(canonical(profile_row["destinations"]))}
         except Problem as error:
             result[quality] = {"available": False, "route": key, "code": error.code, "reason": str(error)}
         except OSError:

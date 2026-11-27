@@ -10,7 +10,7 @@ from threading import Lock
 from time import monotonic
 from uuid import UUID, uuid4
 
-from . import pqa_profiles, settings
+from . import gptr_pipeline, pqa_profiles, settings, usage
 from .common import Problem, atomic, canonical, child, clean_env, digest, file_digest, private_directory, read_json, venv_python, write_json
 
 
@@ -53,7 +53,9 @@ class Runs:
                 marker = read_json(child(folder, "completion.json"))
                 if not record:
                     shutil.rmtree(folder)
-                elif marker:
+                    continue
+                self.record_usage(folder, record, interrupted=True, only_missing=True)
+                if marker:
                     if marker["succeeded"]:
                         try:
                             self.collect(folder, record)
@@ -98,20 +100,43 @@ class Runs:
         with self.lock:
             return bool(self.previews)
 
-    def preview(self, project, ids, question, *, entry=None, quote="", quality="standard", guided=None):
+    def disclosure(self, project, ids, question, quote="", quality="standard"):
+        """The exact transfer a PDF send would make. Read-only: shared by pqa-preflight and the bound preview."""
         config = settings.load(self.root)
         route, location, profile = self.paper_route(config, quality)
         rows = self.projects.selected_pdfs(project, ids)
+        for row in rows:
+            if file_digest(self.projects.artifact_path(row)) != row["sha256"]:
+                raise Problem("changed_pdf", "A PDF changed. Attach the current version before continuing.", 409)
+        files = [[row["id"], row["original_name"], row["sha256"]] for row in rows]
+        credential = digest(config.values["RAH_OPENROUTER_API_KEY"].encode())
+        destinations = profile["destinations"]
+        disclosure_digest = digest(canonical({
+            "files": files, "question_digest": digest(question.encode()), "excerpt_digest": digest((quote or "").encode()),
+            "quality": quality, "route": profile["id"], "destinations": destinations, "credential_hmac": credential,
+            "worker": pqa_profiles.worker_digest(), "observer": usage.observer_digest()}))
+        return {"route": route, "location": location, "profile": profile, "rows": rows, "credential": credential,
+                "result": {"files": [{"id": row["id"], "name": row["original_name"], "size": row["size_bytes"]} for row in rows],
+                           "file_ids": [row["id"] for row in rows], "destinations": destinations,
+                           "destinations_digest": digest(canonical(destinations)), "question": question, "excerpt": quote or "",
+                           "quality": quality, "disclosure_digest": disclosure_digest}}
+
+    def preflight(self, project, ids, question, *, entry=None, quote="", quality="standard"):
+        if entry:
+            self.projects.entry(project, entry)
+        return self.disclosure(project, ids, question, quote, quality)["result"]
+
+    def preview(self, project, ids, question, *, entry=None, quote="", quality="standard", guided=None):
+        shown = self.disclosure(project, ids, question, quote, quality)
+        route, location, profile, rows = shown["route"], shown["location"], shown["profile"], shown["rows"]
         preview_id = str(uuid4())
         folder = private_directory(self.folder(preview_id))
         try:
-            for row in rows:
-                if file_digest(self.projects.artifact_path(row)) != row["sha256"]:
-                    raise Problem("changed_pdf", "A PDF changed. Attach the current version before continuing.", 409)
-            binding = {"project": project, "entry": entry, "credential": digest(config.values["RAH_OPENROUTER_API_KEY"].encode()),
+            binding = {"project": project, "entry": entry, "credential": shown["credential"],
                        "question": question, "quote": quote, "install": location.name, "lock": route["lock_sha256"],
                        "files": [[row["id"], row["original_name"], row["sha256"]] for row in rows], "profile": profile,
-                       "quality": quality, "guided": guided, "worker": pqa_profiles.worker_digest()}
+                       "quality": quality, "guided": guided, "worker": pqa_profiles.worker_digest(),
+                       "observer": usage.observer_digest()}
             preview = Preview(folder, binding, rows, monotonic() + 900, digest(canonical(binding)))
             self.expire()
             with self.lock:
@@ -134,7 +159,8 @@ class Runs:
             raise
         return {"preview_id": preview_id, "binding": preview.digest, "profile": profile, "question": question,
                 "quote": quote, "files": [row["original_name"] for row in rows], "reindex": len(rows),
-                "sizes": [row["size_bytes"] for row in rows], "quality": quality}
+                "sizes": [row["size_bytes"] for row in rows], "quality": quality} | {
+                    key: shown["result"][key] for key in ("file_ids", "destinations", "destinations_digest", "disclosure_digest")}
 
     def observe_request(self, project, entry, *, run_id=None, allowed=("Preparing",)):
         if not entry:
@@ -191,6 +217,7 @@ class Runs:
                     or route["lock_sha256"] != info["lock"]
                     or installation.name != info["install"] or info["profile"] != profile
                     or info.get("worker") != pqa_profiles.worker_digest()
+                    or info.get("observer") != usage.observer_digest()
                     or digest(canonical(info)) != preview.digest):
                 raise Problem("stale_preview", "The PDF route or settings changed. Review the selection again.", 409)
             corpus = private_directory(child(folder, "corpus"))
@@ -209,6 +236,7 @@ class Runs:
             }
             record = {"app": "pqa", "project": info["project"], "version": route["upstream_version"],
                       "entry": info["entry"], "guided": info.get("guided"),
+                      "usage": {"key": list(usage.route_key("pqa", profile["id"], route["lock_sha256"])), "expected": True},
                       "files": [{"id": row["id"], "name": row["original_name"], "sha256": row["sha256"],
                                  "storage": row["storage_name"]} for row in preview.rows]}
             question = info["question"]
@@ -219,11 +247,15 @@ class Runs:
         finally:
             self.clean_run(folder)
 
-    def public_report(self, project, question, mode, spec, version, job, *, entry=None):
+    def public_report(self, project, question, mode, spec, version, job, *, entry=None, lock_sha256=None):
         job.checkpoint(final=True)
         folder = private_directory(self.folder(job.id))
-        args = [str(value) for value in spec.command] + ["--report_type", mode, "--no-pdf", "--no-docx", "--", question]
-        record = {"app": "gptr", "project": project, "version": version, "entry": entry}
+        python, cli = spec.command[0], spec.command[1]
+        args = gptr_pipeline.observer_command(folder, python, cli, [str(value) for value in spec.command[2:]]
+                                              + ["--report_type", mode, "--no-pdf", "--no-docx", "--", question])
+        expected = any(str(spec.env.get(role, "")).startswith("openrouter:") for role in settings.ROLES["gptr"].values())
+        record = {"app": "gptr", "project": project, "version": version, "entry": entry,
+                  "usage": {"key": list(usage.route_key("gptr", mode, lock_sha256)), "expected": expected}}
         try:
             return self.invoke(folder, sys.executable, clean_env(), {"app": "gptr", "command": args, "env": spec.env}, record)
         finally:
@@ -235,16 +267,34 @@ class Runs:
         ):
             shutil.rmtree(folder, ignore_errors=True)
 
+    def record_usage(self, folder, record, *, interrupted=False, only_missing=False):
+        """Summarize the observer log for this entry. Runs right after the worker exits, or on recovery as interrupted."""
+        if not record.get("entry") or not record.get("usage"):
+            return
+        try:
+            if only_missing and self.projects.entry(record["project"], record["entry"])["usage_json"] is not None:
+                return
+            self.projects.record_usage(record["entry"], usage.summarize(
+                child(folder, "usage.jsonl"), route_key=tuple(record["usage"]["key"]),
+                openrouter_expected=record["usage"]["expected"], interrupted=interrupted))
+        except (Problem, OSError, KeyError, TypeError, ValueError):
+            pass
+
     def invoke(self, folder, python, env, payload, record, *, job=None):
         name = "pqa_profile_worker.py" if payload.get("app") == "pqa" else "worker.py"
         script = child(folder, name)
         atomic(script, resources.files("rah").joinpath(name).read_bytes())
         write_json(child(folder, "run.json"), record)
+        tick = self.guided.heartbeat(record["guided"]) if record.get("guided") and self.guided else None
         try:
-            command = [python, script]
+            # PaperQA2's worker runs under the observer; its own guard wraps the observer's send, so the tuple check runs first.
+            command = gptr_pipeline.observer_command(folder, python, script, []) if payload.get("app") == "pqa" else [python, script]
             options = {"cwd": folder, "env": env, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
             if job is None:
-                returncode = subprocess.run(command, input=canonical(payload), **options).returncode
+                try:
+                    returncode = subprocess.run(command, input=canonical(payload), **options).returncode
+                finally:
+                    self.record_usage(folder, record)
             else:
                 job.checkpoint()
                 with subprocess.Popen(command, stdin=subprocess.PIPE, **options) as worker:
@@ -253,6 +303,8 @@ class Runs:
                         deadline = monotonic() + 600
                         while True:
                             job.checkpoint()
+                            if tick:
+                                tick()
                             try:
                                 worker.communicate(input=pending, timeout=min(0.25, max(0, deadline - monotonic())))
                                 break
@@ -263,6 +315,8 @@ class Runs:
                     finally:
                         if worker.poll() is None:
                             worker.kill()
+                        worker.wait()
+                        self.record_usage(folder, record)
                     returncode = worker.returncode
                 job.checkpoint(final=True)
         except subprocess.TimeoutExpired as error:

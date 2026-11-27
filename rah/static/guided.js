@@ -71,26 +71,72 @@ function renderGuidedComposer(current) {
   if (["literature_review", "deep_research", "analyse_my_papers"].includes(state.purpose) && pdf && !pdf.available) {
     notes.push("Managed PDF analysis is unavailable for " + qualityLabels[state.profile] + " here; you can still finish with a partial outcome or use native PaperQA2.");
   }
-  const hint = element("p", run ? "Guided research is active in this chat. Cancel or finish it before starting another."
-    : notes[0] || "Public questions only. You review the survey recipients before anything is sent.");
+  const hint = element("p", run ? "Guided research is active in this chat. Cancel or finish it before starting another." : notes[0] || "");
   footer.append(hint);
-  const start = button("Review public start…", async () => {
+  const shown = state.shown || guided.public_start;
+  const disclosure = element("div");
+  disclosure.className = "start-disclosure";
+  renderStartDisclosure(disclosure, shown);
+  const start = button("Start public research", async status => {
     if (!field.value.trim()) { field.focus(); throw new Error("Enter a " + label.toLowerCase() + "."); }
+    if (!shown?.available) throw Object.assign(new Error(shown?.reason || "Public research is unavailable."), {code: shown?.code});
     let chat = locationState.chat;
     let scope = destination();
     if (!chat) {
+      status("Creating chat…");
       const created = await api("/chats", {project_id: locationState.project});
       drafts.set(created.id, current);
       chat = created.id;
       scope = created.scope_id;
       await route(locationState.project, chat);
     }
-    await publicStart(scope, chat, state);
-  });
+    status("Checking recipients…");
+    const preview = await api(pipelineBase(scope, chat) + "/preview", {purpose: state.purpose, profile: state.profile, question: state.question});
+    if (preview.display_digest !== shown.display_digest) {
+      // Nothing has been sent. Show the recipients the server derived and ask for a second press.
+      state.shown = {available: true, survey: preview.survey, scope_gate: preview.scope_gate, display_digest: preview.display_digest};
+      renderComposer();
+      throw Object.assign(new Error("The recipients changed. Check them and press Start again."), {code: "stale_preview"});
+    }
+    status("Starting survey…");
+    const request = state.request && state.request.digest === preview.digest ? state.request.id : crypto.randomUUID();
+    state.request = {id: request, digest: preview.digest};
+    await api(pipelineBase(scope, chat), {request_id: request, purpose: preview.purpose, profile: preview.profile,
+      question: preview.question, confirmation_digest: preview.digest, public_confirmed: true});
+    state.question = "";
+    state.request = null;
+    state.shown = null;
+    await refreshConversation();
+  }, "Starting…");
   start.className = "primary";
   start.disabled = Boolean(run);
   footer.append(start);
-  composer.append(footer);
+  composer.append(disclosure, footer);
+}
+
+function uniqueModels(models) {
+  return [...new Set(Object.entries(models || {}).filter(([role]) => role !== "EMBEDDING").map(([, model]) => model))].join(", ");
+}
+
+function renderStartDisclosure(parent, shown) {
+  if (!shown) return;
+  if (!shown.available) {
+    const problem = element("p", shown.reason || "Public research is unavailable.");
+    const action = recovery(shown.code);
+    if (action) problem.append(" ", action);
+    parent.append(problem);
+    return;
+  }
+  const survey = shown.survey;
+  const gate = shown.scope_gate;
+  const service = (survey.destinations || [])[0] || "OpenRouter";
+  const gateText = gate.available ? " Then to the Scope Gate (" + gate.model + " via " + gate.endpoint + ")." : " The Scope Gate is unavailable: " + gate.reason;
+  parent.append(element("p", "Sends this exact question to GPT Researcher (" + uniqueModels(survey.models) + " via " + service
+    + ") and " + survey.search + ", which may lead it to fetch public pages." + gateText + " RAH can't detect private text."));
+  const details = routeDetails(survey, "Recipients and prices");
+  if (gate.available) details.append(element("p", "Scope Gate · " + gate.service + " · " + gate.model + " · " + gate.provider + " · " + gate.endpoint),
+    element("p", gate.sends), element("p", "One request per round, no tools, no retries, " + gate.deadline_seconds + "-second deadline."));
+  parent.append(details);
 }
 
 function definition(list, pairs) {
@@ -122,44 +168,66 @@ function routeDetails(route, title = "Recipients and models") {
   return details;
 }
 
-async function publicStart(scope, chat, state) {
-  const preview = await api(pipelineBase(scope, chat) + "/preview", {purpose: state.purpose, profile: state.profile, question: state.question});
-  const {dialog, act, show} = modal("Start " + preview.purpose_label + " · " + qualityLabels[preview.profile]);
-  dialog.append(element("p", "RAH will send this exact public question to a short GPT Researcher survey, then ask the Scope Gate for a few scope questions."),
-    element("blockquote", preview.question), routeDetails(preview.survey, "Survey recipients"));
-  const gate = element("details");
-  gate.append(element("summary", "Scope Gate"));
-  if (preview.scope_gate.available) gate.append(element("p", "OpenRouter · " + preview.scope_gate.model + " · " + preview.scope_gate.provider),
-    element("p", preview.scope_gate.sends), element("p", "One request per round, no tools, no retries, " + preview.scope_gate.deadline_seconds + "-second deadline."));
-  else gate.append(element("p", preview.scope_gate.reason));
-  const prices = element("details");
-  prices.append(element("summary", "Advertised prices"), element("p", preview.pricing.note));
-  for (const [model, price] of Object.entries(preview.pricing.models)) {
-    prices.append(element("p", model + " · " + (price ? "$" + (price.input ?? "?") + " in / $" + (price.output ?? "?") + " out per 1M tokens" + (price.stale ? " · stale" : "") : "unknown")));
+// Pending actions survive re-renders: a card renders its pending button disabled with its label (spec §3.2).
+const pending = new Map();
+
+async function act(run, action, data = {}, step, label) {
+  const path = pipelineBase(run.scope_id, run.chat_id) + "/" + run.id + "/actions";
+  const key = run.id + ":" + action;
+  pending.set(key, label || action.replaceAll("_", " "));
+  inFlight += 1;
+  try {
+    return await api(path, {action, action_id: crypto.randomUUID(), expected_revision: run.revision, step_id: step || null, data});
+  } catch (error) {
+    if (["stale_revision", "stale_preview"].includes(error.code)) {
+      error.message = "This stage moved on. Check its current state.";
+    }
+    throw error;
+  } finally {
+    inFlight -= 1;
+    pending.delete(key);
+    historySignature = undefined;
+    try { await refreshConversation(); } catch (_) { /* polling shows "Reconnecting to RAH…" */ }
   }
-  dialog.append(gate, prices, element("p", preview.notice));
-  const confirmBox = control(dialog, "This question is public and safe to send", "input", "checkbox");
-  show(act("Cancel", () => dialog.close()), act("Confirm and start survey", async () => {
-    if (!confirmBox.checked) throw new Error("Confirm that the question is public and safe to send.");
-    const request = state.request && state.request.digest === preview.digest ? state.request.id : crypto.randomUUID();
-    state.request = {id: request, digest: preview.digest};
-    await api(pipelineBase(scope, chat), {request_id: request, purpose: preview.purpose, profile: preview.profile,
-      question: preview.question, confirmation_digest: preview.digest, public_confirmed: true});
-    state.question = "";
-    state.request = null;
-    dialog.close();
-    await refreshConversation();
-  }, true));
 }
 
-async function act(run, action, data = {}, step) {
-  const path = pipelineBase(run.scope_id, run.chat_id) + "/" + run.id + "/actions";
-  try {
-    const result = await api(path, {action, action_id: crypto.randomUUID(), expected_revision: run.revision, step_id: step || null, data});
-    return result;
-  } finally {
-    await refreshConversation();
+function actionButton(run, action, text, handler, busy) {
+  const key = run.id + ":" + action;
+  const node = button(text, handler, busy || "Working…");
+  if (pending.has(key)) {
+    node.disabled = true;
+    node.setAttribute("aria-busy", "true");
+    node.textContent = busy || "Working…";
   }
+  return node;
+}
+
+const RUNNING = ["queued", "surveying", "running", "waiting_app"];
+
+function stepProgressText(step) {
+  // Process liveness and research progress are separate signals; stalls are display only (spec §3.4).
+  const limit = step.deadline_seconds ? " (limit " + clock(step.deadline_seconds) + ")" : "";
+  const elapsed = step.elapsed_seconds !== null && step.elapsed_seconds !== undefined ? clock(step.elapsed_seconds) + " elapsed" + limit : "";
+  if (!["surveying", "running"].includes(step.state)) return {text: step.display + (elapsed ? " · " + elapsed : ""), stalled: false};
+  const beat = age(step.server_time, step.heartbeat);
+  if (beat !== null && beat > 20) return {text: "Process not responding (" + clock(beat) + ")", stalled: true};
+  if (step.mode === "headless") {
+    const since = step.progress?.received_at ? age(step.server_time, step.progress.received_at) : step.elapsed_seconds;
+    if (beat !== null && since !== null && since > 120) {
+      return {text: "LDR running · no new progress for " + clock(since), stalled: true};
+    }
+    const percent = typeof step.progress?.percent === "number" ? step.progress.percent + "% · " : "";
+    if (step.progress?.message) return {text: percent + step.progress.message + (elapsed ? " · " + elapsed : ""), stalled: false};
+    return {text: "LDR running · " + elapsed, stalled: false};
+  }
+  return {text: step.display + (elapsed ? " · " + elapsed : ""), stalled: false};
+}
+
+function nowLine(run) {
+  const current = run.steps.findLast(step => step.current) || run.steps.at(-1);
+  if (!current) return "";
+  const progress = stepProgressText(current).text;
+  return "Now: " + (stepLabels[current.step_key] || current.step_key) + " · " + progress;
 }
 
 function announce(run) {
@@ -182,7 +250,12 @@ async function renderRun(container, run, lookup) {
     element("span", "Revision " + run.brief_revision), badge);
   const prompt = element("p", run.original_question);
   prompt.className = "prompt";
-  block.append(header, prompt);
+  const now = element("p", nowLine(run));
+  now.className = "now-line";
+  now.dataset.progressRun = run.id;
+  block.append(header, now, prompt);
+  const working = [...pending].filter(([key]) => key.startsWith(run.id + ":")).map(([, label]) => label);
+  if (working.length) block.append(element("p", "Working: " + working.join(", ")));
   announce(run);
   if (run.purpose === "independent_corroboration" && run.brief) {
     const framing = element("details");
@@ -201,13 +274,14 @@ async function renderRun(container, run, lookup) {
   if (comparison?.childElementCount) block.append(comparison);
   const tools = element("div");
   tools.className = "sub-actions";
-  if (run.actions.includes("pause")) tools.append(button("Pause after this step", () => act(run, "pause")));
-  if (run.actions.includes("resume")) tools.append(button("Resume", () => act(run, "resume")));
-  if (run.actions.includes("cancel")) tools.append(button("Cancel research", async () => {
+  if (run.actions.includes("pause")) tools.append(actionButton(run, "pause", "Pause after this step",
+    () => act(run, "pause", {}, null, "Pausing"), "Pausing…"));
+  if (run.actions.includes("resume")) tools.append(actionButton(run, "resume", "Resume", () => act(run, "resume", {}, null, "Resuming"), "Resuming…"));
+  if (run.actions.includes("cancel")) tools.append(actionButton(run, "cancel", "Cancel research", async () => {
     if (!confirm("Cancel this guided research? Saved results are kept.")) return;
-    const result = await act(run, "cancel");
+    const result = await act(run, "cancel", {}, null, "Cancelling");
     if (result.finishing) say("Finishing current step. Automatic continuation is discarded.");
-  }));
+  }, "Cancelling…"));
   if (run.state === "succeeded" || run.state === "cancelled" || run.state === "failed") tools.append(...followUps(run, lookup));
   block.append(tools);
   container.append(block);
@@ -286,11 +360,9 @@ async function stageCard(run, step, isCurrent, lookup) {
   const detail = step.detail || {};
   const count = detail.sources_count;
   definition(facts, [["Native sources", count === undefined ? null : count === null ? "Unknown" : count],
-    ["Advertised native cost", detail.total_cost_usd ? "$" + detail.total_cost_usd + " (native estimate)" : null],
     ["Scope Gate model", detail.observed?.model], ["Scope Gate provider", detail.observed ? detail.observed.provider || "Unobserved" : null],
-    ["Scope Gate cost", detail.observed?.cost ? "$" + detail.observed.cost : null],
-    ["Native result", step.native_result_id && step.app === "ldr" ? step.native_result_id + (detail.verified === false ? " · unverified" : "") : null],
-    ["Received", detail.received?.join(", ")]]);
+    ["Mode", step.mode === "headless" && step.state === "succeeded" ? "Ran in RAH · not saved to LDR's history" : null],
+    ["LDR result", step.native_result_id && step.mode === "headless" ? step.native_result_id : null]]);
   const profile = workspace.guided.profiles.qualities.find(item => item.id === run.selected_profile);
   const models = {survey: profile?.roles.survey, scope_gate: profile?.roles.scope_gate,
     gptr_deep: profile?.roles.gptr_smart, gptr_rapid: profile?.roles.gptr_smart, gptr_comparison: profile?.roles.gptr_smart,
@@ -298,7 +370,31 @@ async function stageCard(run, step, isCurrent, lookup) {
   definition(facts, [["Configured models", models], ["PaperQA2 route", step.step_key === "paper_analysis" ? profile?.pqa_route : null]]);
   if (facts.childElementCount) card.append(facts);
   if (run.brief?.routes?.[step.step_key]) card.append(routeDetails(run.brief.routes[step.step_key], "Approved recipients"));
-  if (step.error_detail && !["succeeded", "skipped"].includes(step.state)) card.append(element("p", step.error_detail));
+  if (RUNNING.includes(step.state)) {
+    const meter = element("progress");
+    meter.className = "stage-progress";
+    meter.max = 100;
+    meter.dataset.progressStep = step.id;
+    if (typeof step.progress?.percent === "number") meter.value = step.progress.percent;
+    const text = stepProgressText(step);
+    const line = element("p", text.text);
+    line.dataset.progressStep = step.id;
+    line.classList.toggle("stalled", text.stalled);
+    card.append(meter, line);
+  }
+  if (step.error_detail && !["succeeded", "skipped"].includes(step.state)) {
+    const problem = element("p", step.error_detail);
+    const action = recovery(step.error_code);
+    if (action) problem.append(" ", action);
+    card.append(problem);
+  }
+  // Usage for every model-driven stage; Papers Needed and paper selection send no model requests.
+  if (!["papers", "paper_selection"].includes(step.step_key)) {
+    const ended = ["succeeded", "failed", "cancelled", "interrupted"].includes(step.state);
+    if (RUNNING.includes(step.state) || step.usage || ended) card.append(usageRow(step.usage, RUNNING.includes(step.state), step.step_key,
+      run.brief?.routes?.[step.step_key]?.model?.service));
+    if (detail.total_cost_usd) card.append(element("p", "GPT Researcher's estimate: $" + detail.total_cost_usd + " (estimated by the app, not billing data)"));
+  }
   if (step.detail?.coverage) card.append(coverage(step.detail.coverage));
   if (step.outputs.length) card.append(await outputList(run, step, lookup));
   if (isCurrent && !["succeeded", "cancelled", "skipped"].includes(run.state)) {
@@ -327,30 +423,39 @@ async function stageActions(card, run, step, lookup) {
   const row = element("div");
   row.className = "sub-actions";
   card.append(row);
-  if (fresh.route_problem) card.append(element("p", fresh.route_problem.message));
+  if (fresh.route_problem) {
+    const problem = element("p", fresh.route_problem.message);
+    const action = recovery(fresh.route_problem.code);
+    if (action) problem.append(" ", action);
+    card.append(problem);
+  }
   if (step.state === "reconfirm_recipients" && fresh.reconfirm) {
     card.append(routeDetails(fresh.reconfirm.route, "Current recipients"));
-    row.append(button("Re-confirm recipients", () => act(fresh, "reconfirm_route", {digest: fresh.reconfirm.digest}, step.id)));
+    row.append(actionButton(fresh, "reconfirm_route", "Re-confirm", () =>
+      act(fresh, "reconfirm_route", {digest: fresh.reconfirm.digest}, step.id, "Re-confirming"), "Re-confirming…"));
   }
-  if (actions.includes("rerun")) row.append(button("Rerun this stage…", async () => {
+  if (actions.includes("rerun")) row.append(actionButton(fresh, "rerun", "Rerun this stage…", async () => {
     if (!confirm("An earlier attempt may already have incurred charges. Start a new attempt?")) return;
-    await act(fresh, "rerun", {confirm_charges: true}, step.id);
-  }));
-  if (actions.includes("reuse_output") && fresh.recovery) row.append(button("Reuse verified output", () =>
-    act(fresh, "reuse_output", {digest: fresh.recovery.digest}, step.id)));
+    await act(fresh, "rerun", {confirm_charges: true}, step.id, "Queuing rerun");
+  }, "Queuing rerun…"));
+  if (actions.includes("reuse_output") && fresh.recovery) row.append(actionButton(fresh, "reuse_output", "Reuse verified output", () =>
+    act(fresh, "reuse_output", {digest: fresh.recovery.digest}, step.id, "Reusing output"), "Reusing output…"));
   if (step.step_key === "scope_gate" && step.state === "awaiting_scope") scopeForm(card, fresh, step);
-  if (["ldr_discovery", "ldr_comparison"].includes(step.step_key) && ["waiting_native", "paused"].includes(step.state)) nativeStage(card, fresh, step);
   if (["papers", "paper_selection"].includes(step.step_key) && step.state === "awaiting_papers") papersStage(card, fresh, step, lookup);
   if (step.step_key === "paper_analysis" && step.state === "awaiting_disclosure") {
-    row.append(button("Review PDF transfer", async () => {
-      const entry = conversation.entries.find(item => item.id === step.entry_id);
-      const info = await api(projectPath(run.scope_id) + "/pqa-preview", {entry_id: step.entry_id, pdfs: entry.input_ids});
-      paperReview({...entry, project_id: run.scope_id}, info);
-    }));
-    row.append(button("Open native PaperQA2 instead", () => tool("apps")));
+    const entry = conversation.entries.find(item => item.id === step.entry_id);
+    sendPapers(card, {
+      inputs: () => ({scope: run.scope_id, entry_id: step.entry_id, pdfs: entry?.input_ids || [], question: entry?.question || ""}),
+      send: async (shown, status) => {
+        await approvePaperSend(run.scope_id, step.entry_id, entry.input_ids, shown, status);
+        historySignature = undefined;
+        await refreshConversation();
+      }});
+    row.append(button("Open native PaperQA2 instead", () => tool("apps"), "Opening…"));
   }
-  if (actions.includes("finish_partial")) row.append(button(run.purpose === "literature_review" ? "Finish with discovery only" : "Finish with report",
-    () => act(fresh, "finish_partial", {}, step.id)));
+  if (actions.includes("finish_partial")) row.append(actionButton(fresh, "finish_partial",
+    run.purpose === "literature_review" ? "Finish with discovery only" : "Finish with report",
+    () => act(fresh, "finish_partial", {}, step.id, "Finishing"), "Finishing…"));
 }
 
 function scopeForm(card, run, step) {
@@ -402,74 +507,24 @@ function scopeForm(card, run, step) {
     }
     for (const [key, route] of Object.entries(result.routes)) preview.append(routeDetails(route, (stepLabels[key] || key) + " recipients"));
     if (result.private_stage) preview.append(element("p", result.private_stage));
-    const review = result.needs_conflict_review ? control(preview, "I reviewed these constraints for conflicts", "input", "checkbox") : null;
-    preview.append(button("Approve scope", async () => {
-      if (review && !review.checked) throw new Error("Confirm that you reviewed the constraints for conflicts.");
-      await act(run, "approve_scope", {digest: result.digest, constraints_reviewed: Boolean(review?.checked)}, step.id);
-    }));
+    const approve = actionButton(run, "approve_scope", "Approve scope", () =>
+      act(run, "approve_scope", {digest: result.digest}, step.id, "Approving scope"), "Approving scope…");
+    if (!result.digest) approve.disabled = true;
+    if (result.route_problem) {
+      const problem = element("p", result.route_problem.message);
+      const action = recovery(result.route_problem.code);
+      if (action) problem.append(" ", action);
+      preview.append(problem);
+    }
+    preview.append(approve);
     preview.querySelector("button")?.focus();
-  }));
-  if (run.actions.includes("ask_more")) buttons.append(button("Ask more questions", () =>
-    act(run, "ask_more", {round_id: "r1", answers: payload().answers}, step.id)));
-  if (run.actions.includes("use_survey_result")) buttons.append(button("Use survey as result", () => act(run, "use_survey_result", {}, step.id)));
+  }, "Building preview…"));
+  if (run.actions.includes("ask_more")) buttons.append(actionButton(run, "ask_more", "Ask more questions", () =>
+    act(run, "ask_more", {round_id: "r1", answers: payload().answers}, step.id, "Asking for more questions"), "Asking…"));
+  if (run.actions.includes("use_survey_result")) buttons.append(actionButton(run, "use_survey_result", "Use survey as result",
+    () => act(run, "use_survey_result", {}, step.id, "Finishing with survey"), "Finishing…"));
   form.append(buttons, preview);
   card.append(form);
-}
-
-function nativeStage(card, run, step) {
-  const route = run.native_route;
-  const box = element("div");
-  if (route) {
-    box.append(element("p", "Approved prompt for LDR"), element("blockquote", route.prompt), routeDetails(route, "LDR route"));
-    const attest = control(box, "I will review the model and search settings inside LDR before pressing Start", "input", "checkbox");
-    const open = async reopen => {
-      if (!attest.checked) throw new Error("Confirm that you will review the LDR settings before starting.");
-      let state = await api("/apps/ldr/launch", {ensure: true});
-      for (let i = 0; i < 175 && state.state !== "Ready"; ++i) {
-        await new Promise(resolve => setTimeout(resolve, 700));
-        state = await api("/apps/ldr/browser");
-        if (["Exited", "Stopped"].includes(state.state)) throw new Error("Local Deep Research stopped. Check App details.");
-      }
-      const result = await act(run, "launch_native", {route_digest: route.digest, attest: true, reopen}, step.id);
-      if (result.native?.manual) say(result.native.manual);
-    };
-    const sub = element("div");
-    sub.className = "sub-actions";
-    sub.append(button(step.detail?.opened_at ? "Open LDR again" : "Review and start in LDR", () => open(false)),
-      button("Reopen LDR handoff", () => open(true)), button("Copy prompt", () => navigator.clipboard.writeText(route.prompt)));
-    box.append(sub);
-  }
-  const received = step.outputs;
-  if (received.length) {
-    const choose = element("fieldset");
-    choose.append(element("legend", "Received for this stage"));
-    const boxes = received.map(output => {
-      const input = control(choose, (output.title || output.original_name) + " · " + output.output_key, "input", "checkbox");
-      input.checked = true;
-      return [output, input];
-    });
-    const publicBox = control(choose, "These came from the approved public LDR research and contain public citations", "input", "checkbox");
-    const manual = received.filter(output => output.role === "native_result");
-    const same = manual.length === 2 ? control(choose, "Both imported files belong to the same LDR result", "input", "checkbox") : null;
-    choose.append(button("Use this LDR result", () => act(run, "confirm_native_result", {artifact_ids: boxes.filter(([, input]) => input.checked).map(([output]) => output.id),
-      attribution: true, public_provenance: publicBox.checked, ...(same ? {same_result: same.checked} : {})}, step.id)));
-    box.append(choose);
-  }
-  const manual = element("div");
-  manual.className = "sub-actions";
-  fileControl(manual, "Import LDR export", false, ".md,.ris", async picked => {
-    if (!picked.length) return;
-    if (!confirm("Import this file as a user-imported LDR export for this stage? Its native result ID stays unverified.")) return;
-    const form = new FormData();
-    form.set("file", picked[0]);
-    form.set("guided_step_id", step.id);
-    form.set("chat_id", run.chat_id);
-    form.set("native_acknowledged", "true");
-    await api(projectPath(run.scope_id) + "/files", form);
-    await refreshConversation();
-  });
-  box.append(manual);
-  card.append(box);
 }
 
 function papersStage(card, run, step, lookup) {
@@ -486,8 +541,8 @@ function papersStage(card, run, step, lookup) {
         input.checked = true;
         return [item, index, input];
       });
-      table.append(button("Save reviewed citations", () => act(run, "set_papers", {source_artifact_id: papers.source_artifact_id,
-        rows: picks.map(([item, index, input]) => ({...item, accept: input.checked, suggestion: index}))}, step.id)));
+      table.append(actionButton(run, "set_papers", "Save reviewed citations", () => act(run, "set_papers", {source_artifact_id: papers.source_artifact_id,
+        rows: picks.map(([item, index, input]) => ({...item, accept: input.checked, suggestion: index}))}, step.id, "Saving citations"), "Saving…"));
       box.append(table);
     } else if (!papers.rows.length) {
       box.append(element("p", "No verified references section or RIS rows were found. Add papers manually."));
@@ -495,8 +550,9 @@ function papersStage(card, run, step, lookup) {
     const manual = element("details");
     manual.append(element("summary", "Add a paper manually"));
     const fields = Object.fromEntries([["title", "Title"], ["doi", "DOI"], ["pmid", "PMID"], ["pmcid", "PMCID"]].map(([key, label]) => [key, control(manual, label)]));
-    manual.append(button("Add paper", () => act(run, "set_papers", {source_artifact_id: null,
-      rows: [{...Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.value || null])), accept: true}]}, step.id)));
+    manual.append(actionButton(run, "set_papers", "Add paper", () => act(run, "set_papers", {source_artifact_id: null,
+      rows: [{...Object.fromEntries(Object.entries(fields).map(([key, input]) => [key, input.value || null])), accept: true}]}, step.id,
+      "Adding paper"), "Adding…"));
     box.append(manual);
     if (papers.rows.length) {
       const list = element("div");
@@ -510,17 +566,14 @@ function papersStage(card, run, step, lookup) {
         if (last) item.append(element("p", last.outcome.replaceAll("_", " ") + (last.error_code ? " · " + last.error_code.replaceAll("_", " ") : "")
           + (last.licence ? " · " + last.licence : "") + (last.version ? " · version " + last.version : "")));
         for (const link of row.links) item.append(document.createTextNode(" "), external(link.label, link.url));
-        if (row.origin_class !== "public_native" && row.access_status !== "oa_acquired" && (row.doi || row.pmcid)) {
-          const preview = run.lookup_previews?.[row.id];
-          if (preview) item.append(button("Review private lookup…", () => privateLookup(run, row, preview)));
-        }
         list.append(item);
       }
       box.append(list);
       const tools = element("div");
       tools.className = "sub-actions";
       if (!papers.settings.oa_auto) tools.append(element("span", "Automatic open-access download is off in Settings."));
-      tools.append(button("Obtain open-access PDFs (first 20 public)", () => act(run, "start_acquisition", {paper_ids: null}, step.id)));
+      tools.append(actionButton(run, "start_acquisition", "Obtain open-access PDFs (first 20 public)",
+        () => act(run, "start_acquisition", {paper_ids: null}, step.id, "Starting lookups"), "Starting lookups…"));
       for (const [fmt, label] of [["csv", "Export requests CSV"], ["ris", "Export RIS"], ["ids", "Export identifiers"]]) {
         tools.append(button(label, async () => {
           const response = await api(pipelineBase(run.scope_id, run.chat_id) + "/" + run.id + "/papers/export?format=" + fmt, undefined, true);
@@ -533,31 +586,40 @@ function papersStage(card, run, step, lookup) {
         }));
       }
       box.append(tools);
+      const counts = step.detail?.acquisition;
+      if (counts) box.append(element("p", (counts.running ? "Looking up · " : "Last lookup · ") + counts.processed + " processed / "
+        + counts.pending + " pending / " + counts.skipped + " skipped / " + counts.failed + " failed (of " + counts.selected + ")"));
+      if (run.lookup_batch) box.append(lookupBatch(run, step, run.lookup_batch));
     }
   }
   box.append(corpusPicker(run, step, lookup));
   card.append(box);
 }
 
-function privateLookup(run, row, preview) {
-  const {dialog, act: dialogAct, show} = modal("Private identifier lookup");
-  if (preview.blocked) {
-    dialog.append(element("p", preview.blocked + ". Add a maintainer contact under Settings → Guided research to enable DOI conversion."));
-    show(dialogAct("Close", () => dialog.close()));
-    return;
+// One action per batch of private identifier lookups, under an immutable per-paper grant (spec §4.5).
+function lookupBatch(run, step, batch) {
+  const box = element("fieldset");
+  box.append(element("legend", "Private identifiers (" + batch.rows.length + "): only the identifiers below are sent"));
+  const picks = batch.rows.map(row => {
+    const input = control(box, (row.title || "Paper") + " · " + row.sends.map(item => item.identifier + " → " + item.destination).join(" then "),
+      "input", "checkbox");
+    input.checked = true;
+    return [row, input];
+  });
+  for (const row of batch.blocked) box.append(element("p", "Blocked · " + row.identifier + " · " + row.reason));
+  if (batch.excluded.length) box.append(element("p", batch.excluded.length + " more · Not included in this batch"));
+  box.append(element("p", batch.notice));
+  if (batch.digest) {
+    const count = () => picks.filter(([, input]) => input.checked).length;
+    const send = actionButton(run, "approve_private_lookups", "Look up " + count() + " private identifiers at PMC", () => {
+      const ids = picks.filter(([, input]) => input.checked).map(([row]) => row.paper_id);
+      if (!ids.length) throw new Error("Select at least one identifier.");
+      return act(run, "approve_private_lookups", {paper_ids: ids, digest: batch.digest}, step.id, "Looking up identifiers");
+    }, "Starting lookups…");
+    for (const [, input] of picks) input.onchange = () => { send.textContent = send.dataset.label = "Look up " + count() + " private identifiers at PMC"; };
+    box.append(send);
   }
-  const sends = element("ul");
-  sends.append(...preview.sends.map(value => element("li", value)));
-  const destinations = element("ul");
-  destinations.append(...preview.destinations.map(value => element("li", value)));
-  dialog.append(element("p", "This identifier was typed, pasted or extracted privately. Approve one " +
-    (preview.stage === "converter" ? "PMC ID Converter request. You review the Cloud Service step separately afterwards." : "PMC Cloud Service lookup.")),
-    element("p", "Sends"), sends, element("p", "Destinations"), destinations, element("p", preview.notice));
-  const decide = approve => dialogAct(approve ? "Approve lookup" : "Decline", async () => {
-    await act(run, "approve_private_lookup", {paper_id: row.id, stage: preview.stage, digest: preview.digest, approve});
-    dialog.close();
-  }, approve);
-  show(decide(false), decide(true));
+  return box;
 }
 
 function corpusPicker(run, step, lookup) {
@@ -639,11 +701,34 @@ function corpusPicker(run, step, lookup) {
   const routeId = {budget: "pqa-budget-v1", standard: "pqa-standard-v1", premium: "pqa-premium-v1"}[run.selected_profile];
   const pdf = workspace.guided.pdf_analysis[run.selected_profile];
   box.append(element("p", "PaperQA2 route · " + routeId + (pdf?.available ? "" : " · currently unavailable on this platform")));
-  box.append(button("Use these PDFs", () => {
-    if (!question.value.trim()) throw new Error("Enter the private analysis question.");
-    const ordered = pdfs.map(item => item.id).filter(id => chosen.has(id));
-    return act(run, "select_corpus", {pdf_ids: ordered, analysis_question: question.value, excerpt: excerpt.value, route_id: routeId}, step.id);
-  }));
+  const ordered = () => pdfs.map(item => item.id).filter(id => chosen.has(id));
+  // The question is trimmed here exactly as the preflight trims it, so the bound preview reproduces the disclosure.
+  const select = () => act(run, "select_corpus", {pdf_ids: ordered(), analysis_question: question.value.trim(), excerpt: excerpt.value, route_id: routeId},
+    step.id, "Saving PDF selection");
+  const sender = sendPapers(box, {
+    inputs: () => ({scope: run.scope_id, pdfs: ordered(), question: question.value, excerpt: excerpt.value, quality: run.selected_profile}),
+    send: async (shown, status) => {
+      status("Saving selection…");
+      await select();
+      const latest = await api(pipelineBase(run.scope_id, run.chat_id) + "/" + run.id);
+      const analysis = latest.steps.findLast(item => item.step_key === "paper_analysis");
+      if (!analysis || analysis.state !== "awaiting_disclosure") return;  // The card shows why (e.g. the route is unavailable).
+      const entry = (await api(projectPath(run.scope_id) + "/chats/" + run.chat_id)).entries.find(item => item.id === analysis.entry_id);
+      await approvePaperSend(run.scope_id, analysis.entry_id, entry.input_ids, shown, status);
+      historySignature = undefined;
+      await refreshConversation();
+    },
+    fallback: (error, slot) => {
+      // With managed PDF analysis unavailable, the selection can still be saved so the partial finish is offered.
+      if (["profile_unavailable", "unverified_profile"].includes(error.code)) slot.append(actionButton(run, "select_corpus",
+        "Save selection without sending", () => {
+          if (!question.value.trim()) throw new Error("Enter the private analysis question.");
+          return select();
+        }, "Saving…"));
+    }});
+  question.addEventListener("input", sender.update);
+  excerpt.addEventListener("input", sender.update);
+  list.addEventListener("change", sender.update);
   return box;
 }
 

@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
-from rah import pqa_profiles, settings
+from rah import pqa_profiles, settings, usage
 from rah.common import Problem, atomic, digest, prepare_root, private_directory, venv_python, write_json
 from rah.installer import RouteBook
 from rah.jobs import Jobs
@@ -74,7 +74,7 @@ class HubTest(unittest.TestCase):
         report.write_text(
             "TY  - ELEC\nID  - ref1\nTI  - Synthetic trial\nUR  - https://pubmed.ncbi.nlm.nih.gov/123456/\nER  - \n"
             "TY  - ELEC\nID  - ref2\nTI  - Replication\nDO  - 10.1000/test\nER  - \n", encoding="utf-8")
-        rows = structured_citations(report)
+        rows = structured_citations(report).rows
         self.assertEqual(rows[0]["pmid"], "123456")
         self.assertEqual(rows[1]["doi"], "10.1000/test")
         report.write_text('{"sources":[]}', encoding="utf-8")
@@ -116,7 +116,7 @@ class HubTest(unittest.TestCase):
         providers = {role: "Fixture-" + role for role in PAPER_ROLES}
         enabled = dict(pqa_profiles.REGISTRY["pqa-standard-v1"]) | {"enabled": ({
             **host, "upstream_version": "fixture", "lock_sha256": lock_hash, "worker_sha256": pqa_profiles.worker_digest(),
-            "providers": providers, "evidence_sha256": "e" * 64},)}
+            "observer_sha256": usage.observer_digest(), "providers": providers, "evidence_sha256": "e" * 64},)}
         with patch.object(pqa_profiles, "REGISTRY", dict(pqa_profiles.REGISTRY) | {"pqa-standard-v1": enabled}):
             declined = runs.preview(project, [chosen], "Question")
             self.assertFalse((runs.folder(declined["preview_id"]) / "corpus").exists())

@@ -49,11 +49,11 @@ function modal(title) {
   dialog.append(label);
   document.body.append(dialog);
   dialog.addEventListener("close", () => dialog.remove(), {once: true});
-  function act(text, action, primary = false) {
-    const node = button(text, async () => {
-      try { status.hidden = true; await action(); }
+  function act(text, action, primary = false, busy = "Working…") {
+    const node = button(text, async relabel => {
+      try { status.hidden = true; return await action(relabel); }
       catch (error) { status.hidden = false; status.textContent = error.message; }
-    });
+    }, busy);
     if (primary) node.className = "primary";
     return node;
   }
@@ -72,7 +72,7 @@ function editName(title, initial, action) {
   const input = control(dialog, "Name");
   input.value = initial;
   input.maxLength = 160;
-  const save = act("Save", async () => { await action(input.value); dialog.close(); }, true);
+  const save = act("Save", async () => { await action(input.value); dialog.close(); }, true, "Saving…");
   input.addEventListener("keydown", event => { if (event.key === "Enter") save.click(); });
   show(act("Cancel", () => dialog.close()), save);
   input.select();
@@ -178,49 +178,137 @@ async function uploadAttachment(project, entry, item, kind) {
   return (await api(projectPath(project) + "/files", form)).artifact_id;
 }
 
-function paperReview(entry, info) {
-  const {dialog, act, show} = modal("Review PaperQA2 transfer");
-  const list = element("ul");
-  list.append(...info.files.map(name => element("li", name)));
-  const providers = [...new Set(info.profile.destinations.map(row => row.provider))].join(", ");
-  dialog.append(element("p", info.files.length + (info.files.length === 1 ? " PDF" : " PDFs") + " · PaperQA2 → OpenRouter → " + providers
-    + (info.quality ? " · " + info.quality[0].toUpperCase() + info.quality.slice(1) + " quality" : "")),
-    list, element("p", "PaperQA2 parses these PDFs locally and sends extracted text, question and excerpts, and citation details for analysis and embeddings. "
-      + "Each role is restricted to one provider with fallbacks disabled. A response that omits its serving provider is recorded as unobserved. Charges may apply."),
-    element("p", info.question));
-  if (info.quote) dialog.append(element("blockquote", info.quote));
-  const details = element("details");
-  details.append(element("summary", "Models, providers and endpoints"), ...info.profile.destinations.map(row =>
-    element("p", row.role + " · " + row.model + " · " + row.provider + " only · " + row.endpoint + " · " + row.data)));
-  dialog.append(details, element("p", "By approving, you confirm the key excludes this run from prompt logging or additional trace exports."),
-    external("OpenRouter privacy settings (ZDR optional)", "https://openrouter.ai/settings/privacy"));
-  async function decide(approve) {
-    for (const node of dialog.querySelectorAll("button")) node.disabled = true;
-    try {
-      await api(projectPath(entry.project_id) + "/pqa-approve", {preview_id: info.preview_id, binding: info.binding,
-        approve, account_exports_checked: approve});
-      dialog.close();
-      await refreshConversation();
-    } finally {
-      for (const node of dialog.querySelectorAll("button")) node.disabled = false;
-    }
+// ---- Usage (spec §5.5). Figures are OpenRouter's per-response records; nothing is derived from shared-key totals.
+
+function money(value) { return "$" + Number(value).toFixed(4); }
+
+function usageText(usage, running, step, provider) {
+  if (running) return "OpenRouter usage appears when this step ends.";
+  if (!usage) return "Not recorded (before usage tracking)";
+  if (usage.basis === "not_observed") return "Not observed: ran in the app's own interface.";
+  if (!usage.requests) {
+    if (usage.openrouter_expected === false) return "No OpenRouter requests observed. Model calls went to "
+      + (provider || "another provider") + ", which RAH doesn't meter.";
+    if (usage.coverage === "qualified" && usage.requests === 0 && step === "scope_gate") return "No model request was made.";
+    return "No usage observed — coverage unknown";
   }
-  dialog.addEventListener("cancel", event => { event.preventDefault(); dialog.querySelector("button").click(); });
-  show(act("Cancel", () => decide(false)), act("Approve and run", () => decide(true), true));
+  const parts = ["OpenRouter · " + usage.requests + (usage.requests === 1 ? " request" : " requests"),
+    usage.prompt_tokens.toLocaleString() + " input / " + usage.completion_tokens.toLocaleString() + " output tokens"];
+  if (usage.cost_usd !== null && usage.cost_usd !== undefined) {
+    parts.push(usage.complete ? money(usage.cost_usd) + " (reported by OpenRouter)" : "at least " + money(usage.cost_usd));
+  } else parts.push("cost not reported");
+  const notes = [];
+  if (!usage.complete) {
+    const reason = {interrupted: "RAH stopped during this step", truncated: "usage log truncated", unparsed: "some responses could not be read",
+      coverage_unverified: "request paths for this app version aren't verified", no_usage_observed: "no usage observed"}[usage.reason];
+    if (usage.cost_missing) notes.push(usage.cost_missing + " of " + usage.requests + " responses had no cost");
+    if (usage.aborted) notes.push("stopped mid-response");
+    if (reason) notes.push(reason);
+  }
+  const failed = [];
+  if (usage.errors) failed.push(usage.errors + (usage.errors === 1 ? " error response" : " error responses"));
+  if (usage.no_response) failed.push(usage.no_response + (usage.no_response === 1 ? " failed connection" : " failed connections"));
+  if (failed.length) parts.push(failed.join(" and ") + " (no usage reported)");
+  if (usage.byok) parts.push(usage.byok + " BYOK requests: OpenRouter fee only; provider charges billed separately");
+  return parts.join(" · ") + (notes.length ? " — partial: " + notes.join("; ") : "");
 }
 
-async function dispatchPaper(entry, local, ids) {
-  if (entry.state === "Preparing") {
-    for (const item of local.files) {
-      const artifact = await uploadAttachment(entry.project_id, entry.id, item, "pdf");
-      if (!ids.includes(artifact)) ids.push(artifact);
-    }
-    local.files = [];
+function usageRow(usage, running, step, provider) {
+  const row = element("p", usageText(usage, running, step, provider));
+  row.className = "usage-row";
+  return row;
+}
+
+// ---- One-click PDF send against a read-only server preflight (spec §4.4).
+
+function sendPapers(parent, context) {
+  // context: {inputs() -> {pdfs, question, excerpt, quality, entry_id?}, send(preflight, status), fallback?(error)}
+  const box = element("div");
+  box.className = "send-papers";
+  const disclosure = element("div");
+  const row = element("div");
+  row.className = "sub-actions";
+  let latest = null;
+  let pending = 0;
+  let timer;
+  const send = button("Select PDFs to send", async status => {
+    if (!latest) throw new Error("Wait for the transfer check to finish.");
+    return context.send(latest, status);
+  }, "Sending…");
+  send.className = "primary";
+  send.disabled = true;
+  row.append(send);
+  const fallback = element("span");
+  row.append(fallback);
+  box.append(disclosure, row);
+  parent.append(box);
+  function label(text, enabled) {
+    send.dataset.label = text;
+    if (send.getAttribute("aria-busy") !== "true") { send.textContent = text; send.disabled = !enabled; }
   }
-  const info = await api(projectPath(entry.project_id) + "/pqa-preview", {entry_id: entry.id, pdfs: ids});
+  function render(info) {
+    const providers = [...new Set(info.destinations.map(item => item.provider))].join(", ");
+    const files = element("ol");
+    files.append(...info.files.map(item => element("li", item.name)));
+    const roles = element("ul");
+    roles.append(...info.destinations.map(item => element("li", item.role + " · " + item.model + " · " + item.provider + " only · " + item.endpoint)));
+    disclosure.replaceChildren(files,
+      element("p", "PaperQA2 parses these PDFs locally and sends extracted text, your question, any excerpt and citation details."),
+      roles, element("p", "Each role is restricted to one provider with fallbacks disabled."),
+      element("p", "Sending confirms the key excludes this run from prompt logging or additional trace exports. "),
+      external("OpenRouter privacy settings (ZDR optional)", "https://openrouter.ai/settings/privacy"), element("p", "Charges may apply."));
+    label("Send " + info.files.length + (info.files.length === 1 ? " PDF" : " PDFs") + " to PaperQA2 · OpenRouter → " + providers, true);
+  }
+  async function check() {
+    const inputs = context.inputs();
+    fallback.replaceChildren();
+    latest = null;
+    if (!inputs.pdfs.length) { disclosure.replaceChildren(); label("Select PDFs to send", false); return; }
+    if (!inputs.question?.trim()) { disclosure.replaceChildren(); label("Enter a question to send", false); return; }
+    const ticket = ++pending;
+    label("Checking…", false);
+    try {
+      const body = {pdfs: inputs.pdfs, ...(inputs.entry_id ? {entry_id: inputs.entry_id} : {question: inputs.question.trim(),
+        excerpt: inputs.excerpt || "", quality: inputs.quality || "standard"})};
+      const info = await api(projectPath(inputs.scope) + "/pqa-preflight", body);
+      if (ticket !== pending) return;
+      latest = info;
+      render(info);
+    } catch (error) {
+      if (ticket !== pending) return;
+      disclosure.replaceChildren();
+      label("Cannot send yet", false);
+      const problem = element("p", error.message);
+      problem.className = "inline-error";
+      problem.setAttribute("role", "alert");
+      const action = recovery(error.code);
+      if (action) problem.append(" ", action);
+      fallback.append(problem);
+      context.fallback?.(error, fallback);
+    }
+  }
+  const update = () => { clearTimeout(timer); timer = setTimeout(() => check(), 400); };
+  check();
+  return {update, element: box};
+}
+
+async function approvePaperSend(project, entryId, pdfs, shown, status) {
+  // Re-derive the bound preview; send only if the server reproduces the disclosure shown before the click.
+  status?.("Checking transfer…");
+  const info = await api(projectPath(project) + "/pqa-preview", {entry_id: entryId, pdfs});
+  if (info.disclosure_digest !== shown.disclosure_digest) {
+    const error = new Error("The transfer changed. Check it and press Send again.");
+    error.code = "stale_preview";
+    throw error;
+  }
+  status?.("Sending…");
+  await api(projectPath(project) + "/pqa-approve", {preview_id: info.preview_id, binding: info.binding, approve: true,
+    account_exports_checked: true});
+}
+
+async function dispatchPaper(entry, ids, shown, status) {
+  await approvePaperSend(entry.project_id, entry.id, ids, shown, status);
   staged.delete(entry.id);
-  await refreshConversation();
-  if (locationState.chat === entry.chat_id && screen === "workspace") paperReview(entry, info);
 }
 
 async function launchNative(app, request) {
@@ -264,7 +352,10 @@ function showNative(entry, result) {
   ] : entry.question ? [act("Copy question", () => navigator.clipboard.writeText(entry.question), true)] : []));
 }
 
-async function submit(current, data) {
+async function submit(current, data, status) {
+  const shown = data.shown;
+  data = {...data};
+  delete data.shown;
   const existing = current.submit;
   const intent = JSON.stringify(data);
   const payload = existing?.intent === intent ? existing.payload : {...data, entry_id: crypto.randomUUID()};
@@ -274,7 +365,6 @@ async function submit(current, data) {
   const visible = locationState.project === data.project_id && locationState.chat === data.chat_id && screen === "workspace";
   if (!entry.replay || entry.state === "Preparing") {
     if (data.app === "pqa" && data.action === "managed") {
-      staged.set(entry.id, {files: [...current.files], pdfs: [...current.pdfs]});
       current.files = [];
       current.pdfs = [];
       current.quote = "";
@@ -292,8 +382,7 @@ async function submit(current, data) {
     } else if (entry.app === "gptr") {
       await api(projectPath(entry.project_id) + "/gptr-reports", {entry_id: entry.id, recipients: data.recipients});
     } else {
-      const local = staged.get(entry.id);
-      await dispatchPaper(entry, local, [...entry.input_ids]);
+      await dispatchPaper(entry, [...entry.input_ids], shown, status);
     }
   } catch (error) {
     if (data.action === "native") {
@@ -303,17 +392,6 @@ async function submit(current, data) {
   } finally {
     if (locationState.chat === entry.chat_id && screen === "workspace") await refreshConversation();
   }
-}
-
-function confirmPublic(current, data, readiness) {
-  const {dialog, act, show} = modal("Send a public question");
-  dialog.append(element("p", "GPT Researcher sends the current question to " +
-    readiness.recipients.join(" and ") + ". Research may also fetch public websites."),
-    element("blockquote", data.question));
-  show(act("Cancel", () => dialog.close()), act("Confirm and run", async () => {
-    await submit(current, {...data, public: true, recipients: readiness.recipients});
-    dialog.close();
-  }, true));
 }
 
 function suppliedInChat(project, supplied) {
@@ -349,15 +427,29 @@ let transcript;
 let composer;
 let availableCorpus = [];
 
-function addLocalFiles(target, files) {
-  for (const file of files) {
-    if (!file.name.toLowerCase().endsWith(".pdf") || file.size > 256 * 1024 ** 2) {
-      say("Select PDFs no larger than 256 MiB each.");
-      continue;
-    }
-    if (!target.files.some(item => item.file.name === file.name && item.file.size === file.size
-        && item.file.lastModified === file.lastModified)) target.files.push({id: crypto.randomUUID(), file});
+// Newly attached PDFs are saved locally to this chat first; that sends nothing externally (spec §4.4).
+async function saveToChat(files, status) {
+  const usable = files.filter(file => file.name.toLowerCase().endsWith(".pdf") && file.size <= 256 * 1024 ** 2);
+  if (usable.length !== files.length) say("Select PDFs no larger than 256 MiB each.");
+  let chat = locationState.chat;
+  if (!chat) {
+    status?.("Creating chat…");
+    const current = draft();
+    const created = await api("/chats", {project_id: locationState.project});
+    drafts.set(created.id, current);
+    chat = created.id;
+    await route(locationState.project, chat);
   }
+  const saved = [];
+  for (const file of usable) {
+    status?.("Saving " + file.name + " to this chat (local)…");
+    const form = new FormData();
+    form.set("file", file);
+    form.set("kind", "pdf");
+    form.set("chat_id", chat);
+    saved.push({id: (await api(projectPath(destination()) + "/files", form)).artifact_id, name: file.name});
+  }
+  return saved;
 }
 
 function fileControl(parent, label, multiple, extensions, action) {
@@ -368,10 +460,23 @@ function fileControl(parent, label, multiple, extensions, action) {
   input.setAttribute("aria-label", label);
   input.accept = extensions;
   input.multiple = multiple;
+  const text = document.createTextNode(label);
+  field.replaceChildren(text);
   input.onchange = async () => {
-    try { say(""); await action([...input.files]); }
-    catch (error) { say(error.message); }
-    finally { input.value = ""; }
+    const picked = [...input.files];
+    if (!picked.length) return;
+    input.disabled = true;
+    field.setAttribute("aria-busy", "true");
+    text.textContent = "Uploading " + (picked.length === 1 ? picked[0].name : picked.length + " files") + "…";
+    clearInlineError(field);
+    try { await action(picked, value => { text.textContent = value; }); }
+    catch (error) { if (field.isConnected) inlineError(field, error); else say(error.message); }
+    finally {
+      input.value = "";
+      input.disabled = false;
+      field.removeAttribute("aria-busy");
+      text.textContent = label;
+    }
   };
   field.append(input);
   parent.append(field);
@@ -420,7 +525,8 @@ function renderComposer() {
   field.maxLength = 8000;
   field.rows = 3;
   field.value = current.question;
-  field.oninput = () => { current.question = field.value; };
+  let sender;
+  field.oninput = () => { current.question = field.value; sender?.update(); };
   composer.append(toolbar, field);
   if (app === "pqa") {
     const attach = element("div");
@@ -445,7 +551,11 @@ function renderComposer() {
         button("Remove quote", () => { current.quote = ""; renderComposer(); }));
       chips.append(quote);
     }
-    fileControl(attach, "Attach PDF", true, ".pdf", files => { addLocalFiles(current, files); renderComposer(); });
+    fileControl(attach, "Attach PDF", true, ".pdf", async (files, status) => {
+      for (const item of await saveToChat(files, status)) if (!current.pdfs.some(pdf => pdf.id === item.id)) current.pdfs.push(item);
+      renderComposer();
+    });
+    attach.append(element("span", "Attached PDFs are saved to this chat (local) before anything is sent."));
     if (destination()) attach.append(button("From saved files", () => picker(current, artifacts)));
     if (availableCorpus.length && !current.pdfs.length && !current.files.length) attach.append(button("Use last corpus", () => {
       current.pdfs = [...availableCorpus];
@@ -456,7 +566,8 @@ function renderComposer() {
   const footer = element("div");
   footer.className = "composer-footer";
   const hint = element("p", !readiness.ready ? readiness.reason : app === "gptr" ?
-    "Public questions only · Search: " + readiness.recipients.at(-1) : app === "pqa" ? "You review the selected material before transfer." : "Research runs in the native LDR window.");
+    "Sends this public question to " + readiness.recipients.join(" and ") + ". Research may also fetch public websites. RAH can't detect private text."
+    : app === "pqa" ? "The transfer below is checked by RAH before you send." : "Research runs in the native LDR window.");
   footer.append(hint);
   function payload(action, target = app) {
     return {app: target, action, project_id: project, chat_id: chat, question: action === "native" ? field.value : field.value.trim(),
@@ -491,7 +602,7 @@ function renderComposer() {
   options.append(copy, button("Show standalone PaperQA2 command", () => submit(current, payload("native", "pqa"))));
   footer.append(availableActions);
   const send = button(!readiness.ready ? (readiness.code === "app_not_installed" || readiness.code === "unverified_profile" ? "App details" : "Finish setup")
-    : app === "pqa" ? "Analyse papers with PaperQA2…" : "Run GPT Researcher report in RAH…", async () => {
+    : "Run public GPT Researcher report", async status => {
     if (!readiness.ready) {
       if (readiness.code === "app_not_installed" || readiness.code === "unverified_profile") return tool("apps");
       await tool("settings");
@@ -508,13 +619,9 @@ function renderComposer() {
     }
     const data = payload("managed");
     if (!data.question) { field.focus(); throw new Error("Enter a question."); }
-    if (app === "pqa") {
-      const total = current.pdfs.length + current.files.length;
-      if (!total || total > 40) throw new Error("Attach one to 40 PDFs.");
-    }
-    if (app === "gptr") return confirmPublic(current, data, readiness);
-    await submit(current, data);
-  });
+    status("Starting report…");
+    await submit(current, {...data, public: true, recipients: readiness.recipients});
+  }, readiness.ready ? "Starting report…" : "Opening…");
   send.className = "primary";
   if (active && readiness.ready) {
     send.disabled = true;
@@ -527,6 +634,20 @@ function renderComposer() {
       availableActions.querySelector("button:not(:disabled)")?.focus();
     }
   };
+  if (app === "pqa" && readiness.ready) {
+    composer.append(footer);
+    sender = sendPapers(composer, {
+      inputs: () => ({scope: destination(), pdfs: current.pdfs.map(item => item.id), question: field.value,
+        excerpt: current.quote, quality: "standard"}),
+      send: async (shown, status) => {
+        const data = payload("managed");
+        if (!data.question) { field.focus(); throw new Error("Enter a question."); }
+        if (!data.pdfs.length || data.pdfs.length > 40) throw new Error("Attach one to 40 PDFs.");
+        if (active) throw new Error("A request is active in this chat.");
+        await submit(current, {...data, shown}, status);
+      }});
+    return;
+  }
   if (app !== "ldr" || !readiness.ready) footer.append(send);
   composer.append(footer);
 }
@@ -584,28 +705,36 @@ async function renderTranscript(next, files, generation) {
         details.append(element("summary", "Selected quote"), element("blockquote", entry.quote));
         card.append(details);
       }
-      if (entry.state === "Preparing") {
-        const local = staged.get(entry.id) || {files: [], pdfs: []};
+      if (["Preparing", "Awaiting approval"].includes(entry.state)) {
+        const local = staged.get(entry.id) || {pdfs: entry.input_ids.map(id => ({id, name: lookup.get(id)?.original_name || id}))};
         staged.set(entry.id, local);
         const controls = element("div");
         controls.className = "sub-actions";
-        const note = element("p", "Attach any remaining PDFs before reviewing this request.");
+        const note = element("p");
+        let sender;
         function updateNote() {
-          note.textContent = [...local.files.map(item => item.file.name), ...local.pdfs.map(item => item.name)].join(", ")
-            || "Attach any remaining PDFs before reviewing this request.";
+          note.textContent = local.pdfs.map(item => item.name).join(", ") || "Attach the PDFs for this request.";
+          sender?.update();
         }
         updateNote();
-        fileControl(controls, "Attach remaining PDFs", true, ".pdf", chosen => { addLocalFiles(local, chosen); updateNote(); });
-        controls.append(button("From project", () => picker(local, files, updateNote)));
-        controls.append(button("Review transfer", async () => {
-          const currentEntry = (await api(projectPath(project) + "/chats/" + entry.chat_id)).entries.find(item => item.id === entry.id);
-          const ids = [...new Set([...local.pdfs.map(item => item.id), ...currentEntry.input_ids])];
-          await dispatchPaper(entry, local, ids);
-        }));
+        if (entry.state === "Preparing") {
+          fileControl(controls, "Attach remaining PDFs", true, ".pdf", async (chosen, status) => {
+            for (const file of chosen) {
+              status("Saving " + file.name + " to this chat (local)…");
+              const id = await uploadAttachment(project, entry.id, {id: crypto.randomUUID(), file}, "pdf");
+              if (!local.pdfs.some(item => item.id === id)) local.pdfs.push({id, name: file.name});
+            }
+            updateNote();
+          });
+          controls.append(button("From project", () => picker(local, files, updateNote)));
+        }
         card.append(note, controls);
-      }
-      if (entry.state === "Awaiting approval") {
-        card.append(button("Review again", () => dispatchPaper(entry, {}, [...entry.input_ids])));
+        sender = sendPapers(card, {
+          inputs: () => ({scope: project, entry_id: entry.id, pdfs: local.pdfs.map(item => item.id), question: entry.question}),
+          send: async (shown, status) => {
+            await dispatchPaper(entry, local.pdfs.map(item => item.id), shown, status);
+            await refreshConversation();
+          }});
       }
       if (["Cancelled", "Failed", "Interrupted"].includes(entry.state)) {
         card.append(button("Use in a new attempt", () => {
@@ -619,18 +748,13 @@ async function renderTranscript(next, files, generation) {
       }
     }
     if (entry.state === "Preparing" && entry.app === "gptr" && entry.action === "managed") {
-      card.append(button("Continue public request", async () => {
-        const readiness = (await api("/workspace")).readiness.gptr;
+      const readiness = workspace.readiness.gptr;
+      if (readiness.ready) card.append(element("p", "Sends the saved public question to " + readiness.recipients.join(" and ") + "."));
+      card.append(button("Run public GPT Researcher report", async () => {
         if (!readiness.ready) throw new Error(readiness.reason);
-        const {dialog, act, show} = modal("Continue public request");
-        dialog.append(element("p", "Send the saved public question to " +
-          readiness.recipients.join(" and ") + "."), element("blockquote", entry.question));
-        show(act("Cancel", () => dialog.close()), act("Confirm and run", async () => {
-          await api(projectPath(project) + "/gptr-reports", {entry_id: entry.id, recipients: readiness.recipients});
-          dialog.close();
-          await refreshConversation();
-        }, true));
-      }));
+        await api(projectPath(project) + "/gptr-reports", {entry_id: entry.id, recipients: readiness.recipients});
+        await refreshConversation();
+      }, "Starting report…"));
     }
     if (["Preparing", "Awaiting approval"].includes(entry.state) && entry.action === "managed") {
       card.append(button("Discard request", async () => {
@@ -639,6 +763,14 @@ async function renderTranscript(next, files, generation) {
         await refreshConversation();
       }));
     }
+    if (entry.action === "managed") {
+      if (["Running", "Preparing"].includes(entry.state)) {
+        const live = element("p", entryProgressText(entry));
+        live.dataset.progressEntry = entry.id;
+        card.append(live);
+      }
+      card.append(usageRow(entry.usage, ["Running", "Preparing", "Awaiting approval"].includes(entry.state)));
+    } else if (entry.action === "native") card.append(usageRow({basis: "not_observed"}, false));
     if (entry.state === "Running" && entry.operation_id) {
       const state = await api("/operations/" + entry.operation_id).catch(() => null);
       if (state?.cancellable) card.append(button("Request cancellation", async () => {
@@ -673,18 +805,109 @@ async function renderTranscript(next, files, generation) {
   historySignature = signature;
 }
 
+// ---- Status polling (spec §3.4): one timer per open chat, tiered by what is active, with back-off on failure.
+
+const FAST = 1600;
+const SLOW = 6000;
+const BACKOFF = [1600, 3200, 6400];
+let pollFailures = 0;
+let inFlight = 0;
+let lastTier = null;
+
+function clock(seconds) {
+  if (seconds === null || seconds === undefined) return "";
+  const minutes = Math.floor(seconds / 60);
+  return minutes + ":" + String(Math.floor(seconds % 60)).padStart(2, "0");
+}
+
+function age(serverTime, stamp) {
+  // Ages use the server's clock from the same response, never the browser clock.
+  if (!serverTime || !stamp) return null;
+  return Math.max(0, (Date.parse(serverTime) - Date.parse(stamp)) / 1000);
+}
+
+function entryProgressText(entry) {
+  return names[entry.app] + " · " + entry.state + (entry.elapsed_seconds !== null && entry.elapsed_seconds !== undefined
+    ? " · " + clock(entry.elapsed_seconds) + " elapsed" : "");
+}
+
+function pollTier(next) {
+  const entries = next?.entries || [];
+  const runs = next?.pipeline_runs || [];
+  const steps = runs.flatMap(run => run.steps);
+  if (inFlight || entries.some(entry => ["Running", "Preparing"].includes(entry.state))
+      || steps.some(step => ["queued", "surveying", "running", "waiting_app"].includes(step.state))
+      || runs.some(run => ["queued", "surveying", "running", "waiting_app", "brief_approved"].includes(run.state))) return FAST;
+  if (entries.some(entry => entry.state === "Awaiting approval")
+      || runs.some(run => ["awaiting_scope", "awaiting_papers", "awaiting_disclosure", "reconfirm_recipients", "paused", "interrupted"].includes(run.state)))
+    return SLOW;
+  return null;
+}
+
+function schedule(delay) {
+  clearTimeout(poll);
+  poll = delay ? setTimeout(() => refreshConversation().catch(() => {}), delay) : undefined;
+}
+
+function reconnecting(on) {
+  for (const header of document.querySelectorAll(".guided-run > .turn-meta, .turn > .turn-meta")) {
+    let note = header.querySelector(".reconnecting");
+    if (on && !note) {
+      note = element("span", "Reconnecting to RAH…");
+      note.className = "reconnecting";
+      header.append(note);
+    } else if (!on) note?.remove();
+  }
+  if (on && !document.querySelector(".reconnecting")) say("Reconnecting to RAH…");
+  else if (!on && message.textContent === "Reconnecting to RAH…") say("");
+}
+
+function updateProgress(next) {
+  // Progress-only changes update in place, so open details and focused controls are untouched.
+  for (const run of next?.pipeline_runs || []) {
+    for (const step of run.steps) {
+      for (const node of document.querySelectorAll(`[data-progress-step="${step.id}"]`)) {
+        if (node.tagName === "PROGRESS") {
+          const percent = step.progress?.percent;
+          if (typeof percent === "number") node.value = percent;
+          else node.removeAttribute("value");
+        } else {
+          const text = stepProgressText(step);
+          node.textContent = text.text;
+          node.classList.toggle("stalled", text.stalled);
+        }
+      }
+    }
+    for (const node of document.querySelectorAll(`[data-progress-run="${run.id}"]`)) node.textContent = nowLine(run);
+  }
+  for (const entry of next?.entries || []) {
+    for (const node of document.querySelectorAll(`[data-progress-entry="${entry.id}"]`)) node.textContent = entryProgressText(entry);
+  }
+}
+
 async function refreshConversation() {
   clearTimeout(poll);
   const generation = routeGeneration;
-  const {project, chat} = locationState;
+  const {chat} = locationState;
   if (screen !== "workspace") return;
   const scope = destination();
   const path = projectPath(scope);
-  const result = await Promise.all([
-    chat ? api(path + "/chats/" + chat) : null,
-    scope ? api(path) : null
-  ]);
+  let result;
+  try {
+    result = await Promise.all([
+      chat ? api(path + "/chats/" + chat) : null,
+      scope ? api(path) : null
+    ]);
+  } catch (error) {
+    if (generation !== routeGeneration || screen !== "workspace") throw error;
+    pollFailures += 1;
+    reconnecting(true);
+    // Never stop while work is active or waiting: back off, then keep trying every 10 s.
+    if (lastTier || inFlight) schedule(BACKOFF[pollFailures - 1] || 10000);
+    throw error;
+  }
   if (generation !== routeGeneration || screen !== "workspace") return;
+  if (pollFailures) { pollFailures = 0; reconnecting(false); }
   const stickToEnd = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 100;
   const oldState = JSON.stringify([conversation?.entries.map(entry => entry.state), conversation?.pipeline_runs?.map(run => run.state)]);
   [conversation] = result;
@@ -694,19 +917,19 @@ async function refreshConversation() {
     const item = artifacts.find(file => file.id === id);
     return item ? [{id, name: item.original_name}] : [];
   }) || [];
+  updateProgress(conversation);
   await renderTranscript(conversation, artifacts, generation);
   if (generation !== routeGeneration || screen !== "workspace") return;
   const newState = JSON.stringify([conversation?.entries.map(entry => entry.state), conversation?.pipeline_runs?.map(run => run.state)]);
   if (oldState !== newState || !composer.childElementCount) renderComposer();
   if (stickToEnd) transcript.scrollTop = transcript.scrollHeight;
-  const runs = conversation?.pipeline_runs || [];
-  if (conversation?.entries.some(entry => ["Running", "Preparing", "Awaiting approval"].includes(entry.state))
-      || runs.some(run => ["queued", "surveying", "running", "waiting_app", "brief_approved"].includes(run.state))) {
-    poll = setTimeout(() => refreshConversation().catch(error => say(error.message)), 1600);
-  } else if (runs.some(run => ["waiting_native", "awaiting_papers", "awaiting_disclosure"].includes(run.state))) {
-    poll = setTimeout(() => refreshConversation().catch(error => say(error.message)), 4000);
-  }
+  lastTier = pollTier(conversation);
+  schedule(lastTier);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && screen === "workspace") refreshConversation().catch(() => {});
+});
 
 function navHeader() {
   const {project, chat} = locationState;
@@ -810,7 +1033,21 @@ toggle.onclick = () => sidebar(toggle.getAttribute("aria-expanded") !== "true");
 if (token) {
   for (const item of document.querySelectorAll("#sidebar button")) item.disabled = false;
   document.querySelectorAll("[data-view]").forEach(node => { node.onclick = () => { say(""); tool(node.dataset.view); }; });
-  document.querySelector("#new-chat").onclick = () => newChat().catch(error => say(error.message));
+  const newChatButton = document.querySelector("#new-chat");
+  newChatButton.onclick = async () => {
+    if (newChatButton.disabled) return;
+    const label = [...newChatButton.childNodes];
+    newChatButton.disabled = true;
+    newChatButton.setAttribute("aria-busy", "true");
+    newChatButton.textContent = "Creating chat…";
+    try { await newChat(); }
+    catch (error) { say(error.message); }
+    finally {
+      newChatButton.replaceChildren(...label);
+      newChatButton.disabled = false;
+      newChatButton.removeAttribute("aria-busy");
+    }
+  };
   document.querySelector("#new-project").onclick = () => editName("New project", "", async name => {
     const item = await api("/projects", {name});
     expanded.add(item.id);

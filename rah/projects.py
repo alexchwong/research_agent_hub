@@ -1,6 +1,7 @@
 import json
 import os
 from contextlib import closing, contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 from importlib import resources
@@ -65,12 +66,28 @@ def item(pattern, line):
     return next(iter(matches)) if len(matches) == 1 else None
 
 
-def structured_citations(path):
-    """Read citation fields emitted by the pinned LDR RIS exporter."""
+@dataclass(frozen=True)
+class CitationParse:
+    rows: list
+    total: int
+    truncated: bool
+
+
+def structured_citations(path, *, limit=250, overflow="error"):
+    """Read citation fields emitted by the pinned LDR RIS exporter.
+
+    Every record in the file is validated; only the first ``limit`` rows are kept. With ``overflow="error"`` more
+    than ``limit`` records is rejected (the original behaviour); with ``"truncate"`` the result is marked truncated.
+    """
+    if overflow not in ("error", "truncate"):
+        raise ValueError("overflow")
     rows = []
     row = None
+    total = 0
     fields = {"TI": "title", "DO": "doi", "UR": "citation_url", "N1": "note", "AB": "note"}
     try:
+        if path.stat().st_size > REPORT_LIMIT:
+            raise ValueError
         with path.open(encoding="utf-8-sig") as source:
             for line in source:
                 line = line.rstrip()
@@ -87,7 +104,7 @@ def structured_citations(path):
                 elif row is None:
                     raise ValueError
                 elif tag == "ER":
-                    if not row or len(rows) >= 250:
+                    if not row:
                         raise ValueError
                     url = row.get("citation_url", "")
                     if url:
@@ -98,20 +115,29 @@ def structured_citations(path):
                             match = re.fullmatch(r"/([0-9]+)/?", address.path)
                             if match:
                                 row["pmid"] = match.group(1)
-                    rows.append(row)
+                    total += 1
+                    if total > limit and overflow == "error":
+                        raise ValueError
+                    if len(rows) < limit:
+                        rows.append(row)
                     row = None
                 elif tag in fields and value:
                     field = fields[tag]
                     row[field] = row.get(field, "") + (" " if field in row else "") + value
         if row is not None or not rows:
             raise ValueError
-        return rows
+        return CitationParse(rows, total, total > len(rows))
     except (OSError, ValueError) as error:
         raise Problem("unrecognized_export", "Use an LDR RIS export with up to 250 citations, or paste citations instead.") from error
 
 
+def usable_citation(row):
+    """A citation Papers Needed can act on: a title plus a web address or a DOI."""
+    return bool((row.get("title") or "").strip() and ((row.get("citation_url") and valid_url(row["citation_url"])) or row.get("doi")))
+
+
 UNFILED = "00000000-0000-4000-8000-000000000001"
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 PRESERVED_TABLES = ("project", "scope", "chat", "chat_entry", "artifact", "paper", "workspace_setting")
 KINDS = {"pdf": {".pdf"}, "report": {".md", ".txt", ".json", ".ris"}, "answer": {".md"},
          "citations": {".ris", ".bib"}, "questionnaire": {".json"}}
@@ -169,6 +195,7 @@ class Projects:
                 if db.execute("PRAGMA foreign_key_check").fetchone():
                     raise Problem("workspace_migration", "Workspace migration found invalid file references.")
         self.upgrade_v3(migration_hook)
+        self.upgrade_v4()
         with self.connect() as db:
             saved = db.execute("SELECT path FROM workspace_setting WHERE id=1").fetchone()
             self.workspace_root = self.check_root(Path(saved[0])) if saved else root
@@ -236,7 +263,7 @@ class Projects:
                          for name in identities}
                 if (after != counts or moved != identities or db.execute("PRAGMA foreign_key_check").fetchone()
                         or db.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
-                        or db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION):
+                        or db.execute("PRAGMA user_version").fetchone()[0] != 3):
                     raise Problem("workspace_migration", "Workspace upgrade verification failed.")
                 db.execute("COMMIT")
             except BaseException as error:
@@ -248,6 +275,30 @@ class Projects:
             if db.execute("PRAGMA foreign_key_check").fetchone() or db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                 raise Problem("workspace_migration", f"The upgraded workspace failed its checks. Restore {backup}.", 503)
         return backup
+
+    def upgrade_v4(self):
+        """Schema 3 to 4: per-entry usage, and close work left in flight by the previous build. No downgrade path."""
+        with closing(sqlite3.connect(self.database, isolation_level=None, timeout=30)) as db:
+            if db.execute("PRAGMA user_version").fetchone()[0] != 3:
+                return
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                if db.execute("PRAGMA user_version").fetchone()[0] != 3:
+                    db.execute("ROLLBACK")
+                    return
+                sql = resources.files("rah").joinpath("workspace_schema_4.sql").read_text(encoding="utf-8")
+                for statement in sql.split(";"):
+                    if statement.strip():
+                        db.execute(statement)
+                if (db.execute("PRAGMA foreign_key_check").fetchone()
+                        or db.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
+                        or db.execute("PRAGMA user_version").fetchone()[0] != SCHEMA_VERSION):
+                    raise Problem("workspace_migration", "Workspace upgrade verification failed.")
+                db.execute("COMMIT")
+            except BaseException as error:
+                db.execute("ROLLBACK")
+                raise Problem("workspace_migration", "RAH could not upgrade the workspace database to schema 4 and left it "
+                              "unchanged. Close other RAH instances and retry.", 503) from error
 
     @staticmethod
     def check_root(path):
@@ -392,7 +443,25 @@ class Projects:
         result.pop("intent")
         for key in ("input_ids", "result_ids"):
             result[key] = json.loads(result[key])
+        raw = result.pop("usage_json", None)
+        result["usage"] = json.loads(raw) if raw else None
+        stamp = datetime.now(timezone.utc)
+        result["server_time"] = stamp.isoformat()
+        result["elapsed_seconds"] = None
+        if result.get("state") in ("Running", "Surveying"):
+            try:
+                result["elapsed_seconds"] = max(0, int((stamp - datetime.fromisoformat(result["updated_at"])).total_seconds()))
+            except (TypeError, ValueError):
+                pass
         return result
+
+    def record_usage(self, entry, summary):
+        """Store one entry's usage summary (chat_entry.usage_json). Never derived from shared-key totals."""
+        from .usage import encode
+        if not entry:
+            return
+        with self.connect(write=True) as db:
+            db.execute("UPDATE chat_entry SET usage_json=? WHERE id=?", (encode(summary), id_value(entry)))
 
     def entry(self, project, entry):
         with self.connect() as db:

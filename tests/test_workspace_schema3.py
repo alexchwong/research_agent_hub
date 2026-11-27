@@ -83,7 +83,7 @@ def test_v2_upgrade_preserves_rows_bytes_and_backs_up(root):
     before = {name: table_rows(database, name) for name in ("project", "chat", "chat_entry", "artifact", "paper", "scope")}
     digests = {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in data["files"].items()}
     store = Projects(root)
-    assert stored_version(database) == 3
+    assert stored_version(database) == 4
     assert {name: table_rows(database, name) for name in before} == before
     assert {key: hashlib.sha256(path.read_bytes()).hexdigest() for key, path in data["files"].items()} == digests
     with store.connect() as db:
@@ -113,7 +113,7 @@ def test_v2_upgrade_preserves_rows_bytes_and_backs_up(root):
 def test_fresh_install_matches_upgrade_default(root, tmp_path):
     fresh = Projects(root)
     with fresh.connect() as db:
-        assert db.execute("PRAGMA user_version").fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         fresh_default = tuple(db.execute("SELECT * FROM guided_default").fetchone())
     other = prepare_root(tmp_path.resolve() / "upgraded")
     seed_v2(other)
@@ -124,7 +124,7 @@ def test_fresh_install_matches_upgrade_default(root, tmp_path):
 def test_future_version_is_refused_before_workspace_changes(root):
     database = build_v2(root)
     with sqlite3.connect(database) as db:
-        db.execute("PRAGMA user_version=4")
+        db.execute("PRAGMA user_version=5")
     with pytest.raises(Problem) as error:
         Projects(root)
     assert error.value.code == "workspace_version"
@@ -164,7 +164,7 @@ def test_simultaneous_launch_upgrades_once(root):
     for thread in threads:
         thread.join()
     assert not errors
-    assert stored_version(root / "hub/state.sqlite3") == 3
+    assert stored_version(root / "hub/state.sqlite3") == 4
     assert len(list((root / "hub/backups").glob("*.sqlite3"))) == 1
 
 

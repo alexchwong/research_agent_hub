@@ -1,7 +1,6 @@
 import hashlib
 import hmac
 import io
-import json
 from pathlib import Path, PurePath
 import re
 from secrets import token_hex
@@ -137,74 +136,6 @@ def create_app(root, book, uv, identity, token, stop, address):
         except (URLError, OSError, ValueError):
             return None
 
-    class GuidedNative:
-        """Browser-side LDR handoff for guided steps. RAH never reads LDR credentials or its database."""
-
-        def ldr_process(self):
-            if "ldr" not in services and not browser_alive("ldr"):
-                return None
-            service = services.get("ldr")
-            if not service or not browser_alive("ldr"):
-                return None
-            config = settings.load(root)
-            return {"generation": service["generation"],
-                    "stale": service["revision"] != config.revision or service.get("profile_version") != settings.PROFILE_VERSIONS["ldr"]}
-
-        def check_single(self, step):
-            prune_grants()
-            for record in export_grants.values():
-                guided = record.get("guided")
-                if guided and guided["step"] != step and not guided.get("confirmed"):
-                    raise Problem("native_waiting", "Another guided research run is waiting for its LDR result. Finish or "
-                                  "cancel it first; independent native LDR use stays available.", 409)
-
-        def open_ldr(self, info):
-            with lifecycle_lock:
-                if not browser_alive("ldr"):
-                    raise Problem("native_not_ready", "Start Local Deep Research, then open the handoff again.", 409)
-                service = services["ldr"]
-                if service["generation"] != info["generation"]:
-                    raise Problem("stale_preview", "The LDR route changed. Review it again.", 409)
-                state = browser_status("ldr", settings.load(root))
-                if state["state"] != "Ready":
-                    raise Problem("native_not_ready", "Local Deep Research is still starting. Try again shortly.", 409)
-                prune_grants()
-                self.revoke_step(info["step"])
-                grant = token_hex(32)
-                ticket = stage_ticket(service, info["prompt"], grant)
-                url = state["url"]
-                if ticket:
-                    if len(export_grants) >= 128:
-                        del export_grants[next(iter(export_grants))]
-                    export_grants[grant] = {"expires": monotonic() + 8 * 3600, "target": {"scope": info["scope"], "chat": info["chat"]},
-                                            "entry": info["entry"], "guided": info | {"service": service["generation"]}}
-                    opened_url = url + "#rah-handoff=" + ticket
-                else:
-                    opened_url = url
-                Thread(target=webbrowser.open, args=(opened_url,), daemon=True).start()
-                return {"opened": True, "prefill_prepared": bool(ticket and info["prompt"]), "export_ready": bool(ticket),
-                        "url": url, "manual": None if ticket else "Prefill could not be prepared. Copy the approved prompt into "
-                        "LDR, then download its Markdown or RIS export and use Import LDR export in RAH."}
-
-        def revoke_step(self, step):
-            for key in [key for key, record in export_grants.items() if (record.get("guided") or {}).get("step") == step]:
-                del export_grants[key]
-
-        def revoke(self, run):
-            for key in [key for key, record in export_grants.items() if (record.get("guided") or {}).get("run") == run]:
-                del export_grants[key]
-
-        def keep_for_sibling(self, step):
-            for record in export_grants.values():
-                if (record.get("guided") or {}).get("step") == step:
-                    record["guided"]["confirmed"] = True
-
-        def pending(self, chat=None):
-            prune_grants()
-            return any(record.get("guided") and not record["guided"].get("confirmed")
-                       and (chat is None or record["target"]["chat"] == chat) for record in export_grants.values())
-
-    pipelines.native = GuidedNative()
     pipelines.start()
 
     def cap(name):
@@ -259,7 +190,8 @@ def create_app(root, book, uv, identity, token, stop, address):
         with projects.connect() as db:
             default = dict(db.execute("SELECT composer, purpose, profile FROM guided_default WHERE id=1").fetchone())
         guided = {"default": default, "purposes": [{"id": key, "label": label, "recipe": list(RECIPES[key])} for key, label in PURPOSES.items()],
-                  "profiles": research_profiles.public_catalogue(), "pdf_analysis": pqa_profiles.availability(root, book)}
+                  "profiles": research_profiles.public_catalogue(), "pdf_analysis": pqa_profiles.availability(root, book),
+                  "public_start": pipelines.public_start(default.get("profile") or "standard")}
         return jsonify(projects=projects.list(), chats=projects.list_chats(), readiness=readiness, guided=guided)
 
     @app.post("/api/search/searx/test")
@@ -284,8 +216,6 @@ def create_app(root, book, uv, identity, token, stop, address):
         with lifecycle_lock:
             if jobs.busy() or any(browser_alive(name) and (services[name].get("workspace") or {}).get("chat") == chat for name in browsers):
                 raise Problem("chat_busy", "Finish active work and stop the app using this chat folder before deleting it.", 409)
-            if pipelines.native.pending(chat):
-                raise Problem("chat_busy", "A guided LDR export is pending for this chat. Cancel or finish it first.", 409)
             projects.trash_chat(chat)
         return jsonify(trashed=True)
 
@@ -305,7 +235,7 @@ def create_app(root, book, uv, identity, token, stop, address):
             with lifecycle_lock:
                 if jobs.busy() or any(browser_alive(name) for name in browsers):
                     raise Problem("workspace_busy", "Finish active work and stop the native apps before changing the workspace folder.", 409)
-                if runs.has_reviews() or projects.has_active() or pipelines.native.pending():
+                if runs.has_reviews() or projects.has_active():
                     raise Problem("workspace_busy", "Finish or discard active requests before changing the workspace folder.", 409)
                 result = projects.move_workspace(data.get("path")) or {}
                 export_grants.clear()
@@ -707,33 +637,10 @@ def create_app(root, book, uv, identity, token, stop, address):
             record = export_grants.get(grant)
             if not record or record["expires"] <= monotonic():
                 raise Problem("export_handoff", "The export handoff expired. Download and attach the export in RAH.", 403)
-            if record.get("guided"):
-                guided = record["guided"]
-                service = services.get("ldr")
-                if not service or service["generation"] != guided["service"] or not browser_alive("ldr"):
-                    raise Problem("export_handoff", "LDR restarted. Use Reopen LDR handoff in RAH.", 403)
-                brief_prompt = guided["prompt"]
-                with config_lock:
-                    try:
-                        with projects.connect() as db:
-                            run = db.execute("SELECT brief_json FROM pipeline_run WHERE id=?", (guided["run"],)).fetchone()
-                        prompt = json.loads(run["brief_json"])["public_prompts"][
-                            db_step_key(guided["step"])] if run else brief_prompt
-                        fingerprint = pipelines.ldr_route(prompt)[0]
-                    except (Problem, KeyError, TypeError, ValueError):
-                        fingerprint = None
-                if fingerprint != guided["fingerprint"]:
-                    raise Problem("export_handoff", "The LDR settings or process changed since this handoff. Review the stage in RAH.", 409)
-                artifact = pipelines.native_export(guided, fmt, request.get_data(), request.headers.get("X-RAH-Result"))
-                return jsonify(artifact_id=artifact), 201
             workspace_target, entry = record["target"], record["entry"]
             artifact = projects.register(workspace_target["scope"], io.BytesIO(request.get_data()),
                                          "LDR export." + fmt, "report", app="ldr", version=installer.PINS["ldr"], entry=entry)
         return jsonify(artifact_id=artifact), 201
-
-    def db_step_key(step):
-        with projects.connect() as db:
-            return db.execute("SELECT step_key FROM pipeline_step WHERE id=?", (step,)).fetchone()["step_key"]
 
     @app.post("/api/apps/<name>/launch")
     def launch(name):
@@ -950,14 +857,6 @@ def create_app(root, book, uv, identity, token, stop, address):
         files = request.files.getlist("file")
         if len(files) != 1 or len(request.files) != 1:
             raise Problem("file_input", "Select a single file.")
-        guided_step = request.form.get("guided_step_id")
-        if guided_step:
-            chat = request.form.get("chat_id")
-            if not chat or request.form.get("native_acknowledged") != "true":
-                raise Problem("native_confirmation", "Confirm the file is an LDR export for this stage.", 422)
-            with lifecycle_lock:
-                artifact = pipelines.manual_native(id_value(project), id_value(chat), guided_step, files[0].filename, files[0].stream)
-            return jsonify(artifact_id=artifact), 201
         entry = request.form.get("entry_id")
         attachment = request.form.get("attachment_id")
         if attachment and not entry:
@@ -1008,7 +907,7 @@ def create_app(root, book, uv, identity, token, stop, address):
             row = projects.artifact(project, artifact)
             if row["kind"] != "report" or not row["storage_name"].endswith(".ris"):
                 raise Problem("export_type", "Select an LDR RIS export.")
-            return jsonify([item | {"source_artifact_id": artifact} for item in structured_citations(projects.artifact_path(row))])
+            return jsonify([item | {"source_artifact_id": artifact} for item in structured_citations(projects.artifact_path(row)).rows])
         return jsonify(citations(data.get("text")))
 
     @app.post("/api/projects/<project>/papers")
@@ -1044,10 +943,37 @@ def create_app(root, book, uv, identity, token, stop, address):
             _, spec, recipients = public_route()
             if (entry or "recipients" in data) and data.get("recipients") != recipients:
                 raise Problem("public_confirmation", "The model or search recipients changed. Review them before running again.", 409)
-            version = book.route("gptr")["upstream_version"]
-            operation = jobs.start("gptr", lambda job: runs.public_report(project, query, mode, spec, version, job, entry=entry_id),
+            version, lock = book.route("gptr")["upstream_version"], book.route("gptr")["lock_sha256"]
+            operation = jobs.start("gptr", lambda job: runs.public_report(project, query, mode, spec, version, job, entry=entry_id,
+                                                                          lock_sha256=lock),
                                    **runs.observe_request(project, entry_id))
             return jsonify(operation_id=operation), 202
+
+    @app.post("/api/projects/<project>/pqa-preflight")
+    def pqa_preflight(project):
+        """Read-only: the exact disclosure a PDF send would make, with its digest. Writes nothing and launches nothing."""
+        data = body()
+        if set(data) - {"pdfs", "question", "excerpt", "quality", "entry_id"}:
+            raise Problem("request_fields", "Unknown preflight fields.", 422)
+        entry_id = data.get("entry_id")
+        quality = data.get("quality") or "standard"
+        excerpt = data.get("excerpt") or ""
+        if not isinstance(excerpt, str) or len(excerpt) > 8000 or not isinstance(quality, str):
+            raise Problem("request_fields", "Invalid excerpt or quality.", 422)
+        with lifecycle_lock, config_lock:
+            if jobs.closing or jobs.busy("core"):
+                raise Problem("busy", "Wait for the current hub operation.", 409)
+            if entry_id:
+                entry = projects.entry(project, entry_id)
+                guided = pipelines.guided_review(project, entry["id"])
+                if guided:
+                    return jsonify(runs.preflight(project, data.get("pdfs"), entry["question"], entry=entry_id,
+                                                  quote=entry["quote"] or "", quality=guided[1]["selected_profile"]))
+                if entry["app"] != "pqa" or entry["action"] != "managed":
+                    raise Problem("request_app", "Only a PaperQA2 request can be preflighted.", 409)
+                return jsonify(runs.preflight(project, data.get("pdfs"), entry["question"], entry=entry_id,
+                                              quote=entry["quote"] or ""))
+            return jsonify(runs.preflight(project, data.get("pdfs"), question(data), quote=excerpt, quality=quality))
 
     @app.post("/api/projects/<project>/pqa-preview")
     def pqa_preview(project):

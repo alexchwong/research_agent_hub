@@ -18,6 +18,7 @@ def wheel_inputs(tmp_path, monkeypatch):
     (package / "new_module.py").touch()
     (package / "__pycache__").mkdir()
     (package / "__pycache__" / "cli.pyc").touch()
+    (package / ".gitignore").touch()
     stale = repo / "build/lib/rah/cli.py"
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"# stale CLI\n")

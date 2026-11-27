@@ -48,7 +48,7 @@ class Job:
 class Jobs:
     def __init__(self):
         self.lock = RLock()
-        self.executor = ThreadPoolExecutor(max_workers=4)
+        self.executor = ThreadPoolExecutor(max_workers=5)
         self.records = {}
         self.closing = False
 
